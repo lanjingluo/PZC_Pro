@@ -60,6 +60,9 @@ from hexformat import (
 )
 from imagedetect import detect_hex_grid
 MAX_DISPLAY_BYTES = 512 * 1024
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVES_DIR = os.path.join(PROJECT_DIR, 'saves')
+os.makedirs(SAVES_DIR, exist_ok=True)
 DOCUMENTS_DIR = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments)
 PICTURES_DIR = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyPictures)
 IMAGE_FILTER = (
@@ -80,6 +83,7 @@ DEFAULT_COLS = 12
 MIN_ZOOM = 0.1
 MAX_ZOOM = 8.0
 ZOOM_STEP = 1.25
+GRID_PEN_WIDTH = 2.0
 class HexEditorApp:
     """主窗口应用。"""
     def __init__(self):
@@ -95,7 +99,7 @@ class HexEditorApp:
         self.map_height = None
         self.map_margins = {}
         self._syncing = False
-        self._grid_bitmap = None
+        self._grid_path = None
         self.zoom = 1.0
         self._render_timer = Timer()
         self._render_timer.Interval = 120
@@ -287,9 +291,9 @@ class HexEditorApp:
         self.cols_box.Text = str(self.map_cols)
         self.cols_track.Value = self.map_cols
         self._syncing = False
-        if self._grid_bitmap is not None:
-            self._grid_bitmap.Dispose()
-            self._grid_bitmap = None
+        if self._grid_path is not None:
+            self._grid_path.Dispose()
+            self._grid_path = None
         self.canvas_box.Invalidate()
         self.update_map_info()
         self.schedule_render()
@@ -353,56 +357,47 @@ class HexEditorApp:
         self._render_timer.Stop()
         if self.mode != 'map':
             return
-        self.render_grid_bitmap()
+        self.render_grid_path()
         self.canvas_box.Invalidate()
         self.update_map_info()
 
-    def render_grid_bitmap(self):
+    def render_grid_path(self):
         if self.mode != 'map':
             return
         self.form.UseWaitCursor = True
         try:
             w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
-            bmp = Bitmap(w, h)
-            g = Graphics.FromImage(bmp)
-            try:
-                g.Clear(Color.White)
-                ml = max(0, int(self.map_margins.get('l', 0)))
-                mr = max(0, int(self.map_margins.get('r', 0)))
-                mt = max(0, int(self.map_margins.get('t', 0)))
-                mb = max(0, int(self.map_margins.get('b', 0)))
-                if ml or mr or mt or mb:
-                    g.SetClip(Rectangle(ml, mt, max(1, w - ml - mr), max(1, h - mt - mb)))
-                layout = hex_layout(self.map_cols, w, h, self.map_margins)
-                size = layout['cell_size']
-                path = GraphicsPath()
-                for _q, _r, cx, cy in layout['centers']:
-                    pts = [PointF(p[0], p[1]) for p in hex_corners(cx, cy, size)]
-                    path.AddPolygon(pts)
-                pen = Pen(Color.FromArgb(170, 90, 90, 90), 1.0)
-                g.DrawPath(pen, path)
-                pen.Dispose()
-                path.Dispose()
-            finally:
-                g.Dispose()
-            if self._grid_bitmap is not None:
-                self._grid_bitmap.Dispose()
-            self._grid_bitmap = bmp
+            dw = max(1, round(w * self.zoom))
+            dh = max(1, round(h * self.zoom))
+            scale_margins = {}
+            for key in ('l', 't', 'r', 'b'):
+                scale_margins[key] = max(0, int(round(self.map_margins.get(key, 0) * self.zoom)))
+            layout = hex_layout(self.map_cols, dw, dh, scale_margins)
+            size = layout['cell_size']
+            path = GraphicsPath()
+            for _q, _r, cx, cy in layout['centers']:
+                pts = [PointF(p[0], p[1]) for p in hex_corners(cx, cy, size)]
+                path.AddPolygon(pts)
+            if self._grid_path is not None:
+                self._grid_path.Dispose()
+            self._grid_path = path
         finally:
             self.form.UseWaitCursor = False
 
     def on_canvas_paint(self, sender, e):
         g = e.Graphics
         g.Clear(Color.White)
-        if self.mode != 'map' or self._grid_bitmap is None:
+        if self.mode != 'map' or self._grid_path is None:
             return
-        w = self.canvas_box.Width
-        h = self.canvas_box.Height
-        if w != self._grid_bitmap.Width or h != self._grid_bitmap.Height:
-            g.InterpolationMode = InterpolationMode.NearestNeighbor
-            g.DrawImage(self._grid_bitmap, 0, 0, w, h)
-        else:
-            g.DrawImageUnscaled(self._grid_bitmap, 0, 0)
+        ml = max(0, int(round(self.map_margins.get('l', 0) * self.zoom)))
+        mr = max(0, int(round(self.map_margins.get('r', 0) * self.zoom)))
+        mt = max(0, int(round(self.map_margins.get('t', 0) * self.zoom)))
+        mb = max(0, int(round(self.map_margins.get('b', 0) * self.zoom)))
+        if ml or mr or mt or mb:
+            g.SetClip(Rectangle(ml, mt, max(1, self.canvas_box.Width - ml - mr), max(1, self.canvas_box.Height - mt - mb)))
+        pen = Pen(Color.FromArgb(170, 90, 90, 90), GRID_PEN_WIDTH)
+        g.DrawPath(pen, self._grid_path)
+        pen.Dispose()
     def set_zoom(self, zoom):
         zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(zoom)))
         if abs(zoom - self.zoom) < 0.001:
@@ -412,6 +407,7 @@ class HexEditorApp:
             w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
             self.canvas_box.Size = Size(max(1, round(w * self.zoom)), max(1, round(h * self.zoom)))
             self.canvas_box.Invalidate()
+            self.schedule_render()
         self.zoom_label.Text = f'{int(round(self.zoom * 100))}%'
 
     def on_zoom_in(self, sender=None, e=None):
@@ -437,7 +433,7 @@ class HexEditorApp:
     def show_about(self, sender=None, e=None):
         MessageBox.Show(
             self.form,
-            'Hex Editor\n版本 0.8（Python）\n'
+            'Hex Editor\n版本 0.9（Python）\n'
             '创建/保存 .hex 文件；六角格画布支持 A1-A4 纸张与正六边形平铺',
             '关于',
         )
@@ -583,7 +579,7 @@ class HexEditorApp:
         if self.file_path:
             base = os.path.splitext(os.path.basename(self.file_path))[0]
             dlg.FileName = base + '.hex'
-            dlg.InitialDirectory = os.path.dirname(self.file_path)
+            dlg.InitialDirectory = SAVES_DIR
         else:
             if self.mode == 'map':
                 if self.map_paper == 'CUSTOM':
@@ -592,7 +588,7 @@ class HexEditorApp:
                     dlg.FileName = f'{self.map_paper}-{self.map_cols}列.hex'
             else:
                 dlg.FileName = '未命名.hex'
-            dlg.InitialDirectory = DOCUMENTS_DIR
+            dlg.InitialDirectory = SAVES_DIR
         if dlg.ShowDialog(self.form) != DialogResult.OK:
             return False
         try:
@@ -631,6 +627,7 @@ class HexEditorApp:
             dlg.Filter = 'JSON 文件 (*.json)|*.json|所有文件 (*.*)|*.*'
             dlg.DefaultExt = 'json'
             dlg.AddExtension = True
+            dlg.InitialDirectory = SAVES_DIR
             base = '未命名'
             if self.file_path:
                 base = os.path.splitext(os.path.basename(self.file_path))[0]
@@ -650,6 +647,7 @@ class HexEditorApp:
         dlg.Filter = f'{self.original_type} 文件 (*.{ext})|*.{ext}|所有文件 (*.*)|*.*'
         dlg.DefaultExt = ext
         dlg.AddExtension = True
+        dlg.InitialDirectory = SAVES_DIR
         base = '未命名'
         if self.file_path:
             base = os.path.splitext(os.path.basename(self.file_path))[0]
