@@ -41,6 +41,7 @@ from System.Windows.Forms import (
     Timer,
     TrackBar,
 )
+from System.Threading import ApartmentState, Thread, ThreadStart
 from System.Drawing import Bitmap, Color, Font, Graphics, Pen, Point, PointF, Size
 from System.Drawing.Drawing2D import GraphicsPath
 import System
@@ -519,7 +520,13 @@ class HexEditorApp:
         except Exception as ex:
             MessageBox.Show(self.form, f'导出失败：{ex}', 'Hex Editor - 错误')
 def main():
-    app = HexEditorApp()
-    Application.Run(app.form)
+    def run():
+        app = HexEditorApp()
+        Application.Run(app.form)
+
+    thread = Thread(ThreadStart(run))
+    thread.SetApartmentState(ApartmentState.STA)
+    thread.Start()
+    thread.Join()
 if __name__ == '__main__':
     main()
