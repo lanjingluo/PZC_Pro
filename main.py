@@ -4,7 +4,7 @@
 用于存储特定类型的文件。
 结构：魔数 HEX1(4) + 原始类型(8) + 数据长度(8) + 原始内容
 六角格画布：新建空白画布时选择 A1-A4 纸张，整张画布被平顶正六边形覆盖；
-通过顶部输入框或滑块调整横向格子数，格子大小随纸张尺寸与格子数自动计算。
+通过顶部输入框或滑块调整横向格子数，格子大小随纸张尺寸与格子数自动计算；确认格子后再保存，也可从图片识别格子布局。
 """
 import os
 import clr
@@ -42,7 +42,7 @@ from System.Windows.Forms import (
     TrackBar,
 )
 from System.Threading import ApartmentState, Thread, ThreadStart
-from System.Drawing import Bitmap, Color, Font, Graphics, Pen, Point, PointF, Size
+from System.Drawing import Bitmap, Color, Font, Graphics, Pen, Point, PointF, Rectangle, Size
 from System.Drawing.Drawing2D import GraphicsPath
 import System
 from hexformat import (
@@ -52,10 +52,12 @@ from hexformat import (
     hex_layout,
     make_hex_container,
     make_hex_map_payload,
+    map_canvas_size,
     paper_size_pixels,
     parse_hex_map_payload,
     read_hex_container,
 )
+from imagedetect import detect_hex_grid
 MAX_DISPLAY_BYTES = 512 * 1024
 DOCUMENTS_DIR = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments)
 PICTURES_DIR = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyPictures)
@@ -85,6 +87,9 @@ class HexEditorApp:
         self.mode = 'hex'          # 'hex' 或 'map'
         self.map_paper = 'A4'
         self.map_cols = DEFAULT_COLS
+        self.map_width = None
+        self.map_height = None
+        self.map_margins = {}
         self._syncing = False
         self._grid_bitmap = None
         self._render_timer = Timer()
@@ -148,7 +153,7 @@ class HexEditorApp:
         # 六角格画布顶部栏：横向格子数输入框 + 下方滑块
         self.top_bar = Panel()
         self.top_bar.Dock = DockStyle.Top
-        self.top_bar.Height = 76
+        self.top_bar.Height = 118
         self.top_bar.Padding = Padding(8, 4, 8, 4)
         self.cols_label = Label()
         self.cols_label.Text = '横向格子数：'
@@ -162,8 +167,8 @@ class HexEditorApp:
         self.cols_box.TextChanged += self.on_cols_text_changed
         self.top_bar.Controls.Add(self.cols_box)
         self.cols_track = TrackBar()
-        self.cols_track.Location = Point(108, 34)
-        self.cols_track.Size = Size(360, 40)
+        self.cols_track.Location = Point(180, 2)
+        self.cols_track.Size = Size(320, 40)
         self.cols_track.Minimum = MIN_COLS
         self.cols_track.Maximum = MAX_COLS
         self.cols_track.Value = DEFAULT_COLS
@@ -172,9 +177,21 @@ class HexEditorApp:
         self.cols_track.TickFrequency = 5
         self.cols_track.ValueChanged += self.on_cols_track_changed
         self.top_bar.Controls.Add(self.cols_track)
+        self.detect_button = Button()
+        self.detect_button.Text = '从图片识别格子...'
+        self.detect_button.Location = Point(108, 72)
+        self.detect_button.Size = Size(150, 28)
+        self.detect_button.Click += self.on_detect_image
+        self.top_bar.Controls.Add(self.detect_button)
+        self.confirm_button = Button()
+        self.confirm_button.Text = '确认格子并保存...'
+        self.confirm_button.Location = Point(268, 72)
+        self.confirm_button.Size = Size(150, 28)
+        self.confirm_button.Click += self.confirm_and_save
+        self.top_bar.Controls.Add(self.confirm_button)
         self.map_info_label = Label()
         self.map_info_label.AutoSize = True
-        self.map_info_label.Location = Point(484, 44)
+        self.map_info_label.Location = Point(440, 78)
         self.top_bar.Controls.Add(self.map_info_label)
         # 六角格画布（可滚动）
         self.canvas_scroll = Panel()
@@ -211,11 +228,14 @@ class HexEditorApp:
             self.text_box.Text = '（空文件）\r\n保存时默认生成 .hex 文件，用于存储特定类型的文件。'
         else:
             self.text_box.Text = format_hex_view(self.file_bytes, MAX_DISPLAY_BYTES)
-    def show_canvas(self, paper, cols):
+    def show_canvas(self, paper, cols, width=None, height=None, margins=None):
         self.mode = 'map'
         self.map_paper = paper
         self.map_cols = max(MIN_COLS, min(MAX_COLS, int(cols)))
-        w, h = paper_size_pixels(self.map_paper)
+        self.map_width = width
+        self.map_height = height
+        self.map_margins = margins or {}
+        w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
         self.canvas_box.Size = Size(w, h)
         self.text_box.Visible = False
         self.canvas_scroll.Visible = True
@@ -234,14 +254,26 @@ class HexEditorApp:
     def update_map_info(self):
         if self.mode != 'map':
             return
-        w, h = paper_size_pixels(self.map_paper)
-        layout = hex_layout(self.map_cols, w, h)
+        w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
+        layout = hex_layout(self.map_cols, w, h, self.map_margins)
+        name = self.map_paper
+        if name == 'CUSTOM':
+            name = '自定义'
+        margins_text = ''
+        if self.map_margins:
+            margins_text = (
+                f' · 边距 L{self.map_margins.get("l", 0)} '
+                f'T{self.map_margins.get("t", 0)} R{self.map_margins.get("r", 0)} '
+                f'B{self.map_margins.get("b", 0)}'
+            )
         self.map_info_label.Text = (
-            f'{self.map_paper} · {w}×{h} px · 格大小 {layout["cell_size"]:.1f} px · 纵向 {layout["rows"]} 行'
+            f'{name} · {w}×{h} px · 格大小 {layout["cell_size"]:.1f} px · 纵向 {layout["rows"]} 行{margins_text}'
         )
     def current_payload_and_type(self):
         if self.mode == 'map':
-            return make_hex_map_payload(self.map_paper, self.map_cols), MAP_TYPE
+            return make_hex_map_payload(
+                self.map_paper, self.map_cols, self.map_width, self.map_height, self.map_margins
+            ), MAP_TYPE
         return self.file_bytes, self.original_type
     # ---------- 六角格画布事件 ----------
     def on_cols_text_changed(self, sender, e):
@@ -287,12 +319,18 @@ class HexEditorApp:
             return
         self.form.UseWaitCursor = True
         try:
-            w, h = paper_size_pixels(self.map_paper)
+            w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
             bmp = Bitmap(w, h)
             g = Graphics.FromImage(bmp)
             try:
                 g.Clear(Color.White)
-                layout = hex_layout(self.map_cols, w, h)
+                ml = max(0, int(self.map_margins.get('l', 0)))
+                mr = max(0, int(self.map_margins.get('r', 0)))
+                mt = max(0, int(self.map_margins.get('t', 0)))
+                mb = max(0, int(self.map_margins.get('b', 0)))
+                if ml or mr or mt or mb:
+                    g.SetClip(Rectangle(ml, mt, max(1, w - ml - mr), max(1, h - mt - mb)))
+                layout = hex_layout(self.map_cols, w, h, self.map_margins)
                 size = layout['cell_size']
                 path = GraphicsPath()
                 for _q, _r, cx, cy in layout['centers']:
@@ -322,7 +360,7 @@ class HexEditorApp:
     def show_about(self, sender=None, e=None):
         MessageBox.Show(
             self.form,
-            'Hex Editor\n版本 0.6（Python）\n'
+            'Hex Editor\n版本 0.7（Python）\n'
             '创建/保存 .hex 文件；六角格画布支持 A1-A4 纸张与正六边形平铺',
             '关于',
         )
@@ -370,29 +408,49 @@ class HexEditorApp:
         paper = self._choose_paper_size()
         if paper is None:
             return
-        cols = DEFAULT_COLS
-        dlg = SaveFileDialog()
-        dlg.Title = '保存空白六角格画布'
-        dlg.Filter = 'Hex 文件 (*.hex)|*.hex|所有文件 (*.*)|*.*'
-        dlg.DefaultExt = 'hex'
-        dlg.AddExtension = True
-        dlg.FileName = f'{paper}-空白.hex'
-        dlg.InitialDirectory = DOCUMENTS_DIR
+        self.file_path = None
+        self.file_bytes = b''
+        self.original_type = MAP_TYPE
+        self.is_hex_file = False
+        self.show_canvas(paper, DEFAULT_COLS)
+        self.set_status('已创建空白画布（未保存）：调整格子数后点击“确认格子并保存”')
+
+    def on_detect_image(self, sender=None, e=None):
+        dlg = OpenFileDialog()
+        dlg.Title = '选择包含六角格网格的图片'
+        dlg.Filter = IMAGE_FILTER
+        dlg.InitialDirectory = PICTURES_DIR
         if dlg.ShowDialog(self.form) != DialogResult.OK:
             return
+        self.form.UseWaitCursor = True
         try:
-            payload = make_hex_map_payload(paper, cols)
-            data = make_hex_container(payload, MAP_TYPE)
-            with open(dlg.FileName, 'wb') as f:
-                f.write(data)
-            self.file_path = dlg.FileName
-            self.file_bytes = payload
-            self.original_type = MAP_TYPE
-            self.is_hex_file = True
-            self.show_canvas(paper, cols)
-            self.set_status(f'已创建空白画布：{paper}，{cols} 列（保存于 {dlg.FileName}）')
+            result = detect_hex_grid(dlg.FileName)
         except Exception as ex:
-            MessageBox.Show(self.form, f'创建失败：{ex}', 'Hex Editor - 错误')
+            MessageBox.Show(self.form, f'识别失败：{ex}', 'Hex Editor - 错误')
+            return
+        finally:
+            self.form.UseWaitCursor = False
+        if result is None:
+            MessageBox.Show(
+                self.form,
+                '未能在图片中识别出六角格网格。\n'
+                '请使用线条清晰的六角格图片（如本软件生成的画布截图）。',
+                'Hex Editor - 识别',
+            )
+            return
+        self.show_canvas('CUSTOM', result['cols'], result['width'], result['height'], result['margins'])
+        m = result['margins']
+        self.set_status(
+            f'已从图片识别：{result["cols"]} 列，边距 左{m["l"]} 上{m["t"]} 右{m["r"]} 下{m["b"]} px（未保存）'
+        )
+
+    def confirm_and_save(self, sender=None, e=None):
+        if self.mode != 'map':
+            return
+        if self.file_path and self.is_hex_file:
+            self.save_file()
+        else:
+            self.save_as()
     def open_file(self, sender=None, e=None):
         dlg = OpenFileDialog()
         dlg.Title = '打开文件'
@@ -412,8 +470,10 @@ class HexEditorApp:
                     self.is_hex_file = True
                     self.file_path = dlg.FileName
                     self.update_title()
-                    self.show_canvas(map_doc['paper'], map_doc['cols'])
-                    w, h = paper_size_pixels(map_doc['paper'])
+                    self.show_canvas(
+                        map_doc['paper'], map_doc['cols'], map_doc['width'], map_doc['height'], map_doc['margins']
+                    )
+                    w, h = map_canvas_size(map_doc['paper'], map_doc['width'], map_doc['height'])
                     self.set_status(
                         f'已打开六角格画布：{map_doc["paper"]}，{map_doc["cols"]} 列（{w}×{h} px）'
                     )
@@ -448,7 +508,13 @@ class HexEditorApp:
             dlg.FileName = base + '.hex'
             dlg.InitialDirectory = os.path.dirname(self.file_path)
         else:
-            dlg.FileName = '未命名.hex'
+            if self.mode == 'map':
+                if self.map_paper == 'CUSTOM':
+                    dlg.FileName = f'画布-{self.map_cols}列.hex'
+                else:
+                    dlg.FileName = f'{self.map_paper}-{self.map_cols}列.hex'
+            else:
+                dlg.FileName = '未命名.hex'
             dlg.InitialDirectory = DOCUMENTS_DIR
         if dlg.ShowDialog(self.form) != DialogResult.OK:
             return False
@@ -482,7 +548,7 @@ class HexEditorApp:
             MessageBox.Show(self.form, f'保存失败：{ex}', 'Hex Editor - 错误')
     def export_original(self, sender=None, e=None):
         if self.mode == 'map':
-            payload = make_hex_map_payload(self.map_paper, self.map_cols)
+            payload, _ = self.current_payload_and_type()
             dlg = SaveFileDialog()
             dlg.Title = '导出画布数据'
             dlg.Filter = 'JSON 文件 (*.json)|*.json|所有文件 (*.*)|*.*'

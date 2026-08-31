@@ -5,7 +5,7 @@ import struct
 MAGIC = b'HEX1'
 MAX_DISPLAY_BYTES = 512 * 1024
 MAP_TYPE = 'HEXMAP'
-MAP_PAYLOAD_VERSION = 1
+MAP_PAYLOAD_VERSION = 2
 # A 系列纸张（毫米，宽×高，纵向）
 PAPER_SIZES_MM = {
     'A1': (594, 841),
@@ -34,28 +34,41 @@ def paper_size_pixels(paper: str, dpi: int = 96) -> tuple:
     w_mm, h_mm = PAPER_SIZES_MM[paper.upper()]
     scale = dpi / MM_PER_INCH
     return (round(w_mm * scale), round(h_mm * scale))
-def hex_layout(cols: int, width: int, height: int) -> dict:
-    """计算能覆盖整张画布的平顶六角格布局。
+def map_canvas_size(paper: str, width=None, height=None, dpi: int = 96) -> tuple:
+    """返回画布像素尺寸：CUSTOM 用自定义尺寸，A 系列纸张按 DPI 换算。"""
+    if paper.upper() == 'CUSTOM' and width and height:
+        return (int(width), int(height))
+    return paper_size_pixels(paper, dpi)
+def hex_layout(cols: int, width: int, height: int, margins=None) -> dict:
+    """计算平顶六角格布局，可指定网格四周留白（边距）。
     采用奇数列错位（odd-q）排布：
+    - 网格区域 = 画布尺寸减去 margins（l/r/t/b）
     - 横向每列间距 1.5 * cell_size
     - 纵向每行间距 sqrt(3) * cell_size，奇数列整体上移半行
-    - cell_size = width / (1.5 * cols + 0.5)，恰好让第 1 列左侧与最后 1 列右侧贴住画布边缘
-    - 行数自动取整，保证画布底边也被六角格覆盖
+    - cell_size = 网格宽 / (1.5 * cols + 0.5)，恰好让首末两列贴住网格区域左右边
+    - 行数自动取整，保证网格区域底边也被六角格覆盖
     返回 dict：cell_size（中心到顶点的像素）、rows（纵向行数）、
     centers（[(列 q, 行 r, 中心 x, 中心 y), ...]）。
     """
+    margins = margins or {}
+    ml = max(0, int(margins.get('l', 0)))
+    mr = max(0, int(margins.get('r', 0)))
+    mt = max(0, int(margins.get('t', 0)))
+    mb = max(0, int(margins.get('b', 0)))
     cols = max(1, int(cols))
     width = max(1, int(width))
     height = max(1, int(height))
-    cell_size = width / (1.5 * cols + 0.5)
+    grid_w = max(1, width - ml - mr)
+    grid_h = max(1, height - mt - mb)
+    cell_size = grid_w / (1.5 * cols + 0.5)
     row_step = math.sqrt(3) * cell_size
-    rows = int(math.ceil(height / row_step)) + 1
+    rows = int(math.ceil(grid_h / row_step)) + 1
     centers = []
     half_h = math.sqrt(3) * cell_size * 0.5
     for r in range(rows):
         for q in range(cols):
-            x = cell_size * (1.5 * q + 1.0)
-            y = row_step * r + half_h
+            x = ml + cell_size * (1.5 * q + 1.0)
+            y = mt + row_step * r + half_h
             if q % 2 == 1:
                 y += half_h
             centers.append((q, r, x, y))
@@ -77,20 +90,49 @@ def format_hex_view(data: bytes, max_bytes: int = MAX_DISPLAY_BYTES) -> str:
         ascii_part = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
         lines.append(f'{i:08X}  {hex_part:<48} {ascii_part}')
     return '\n'.join(lines)
-def make_hex_map_payload(paper: str, cols: int) -> bytes:
-    """把画布文档序列化成 .hex 负载（JSON，UTF-8）。"""
-    doc = {'v': MAP_PAYLOAD_VERSION, 'paper': paper.upper(), 'cols': int(cols)}
+def make_hex_map_payload(paper: str, cols: int, width=None, height=None, margins=None) -> bytes:
+    """把画布文档序列化成 .hex 负载（JSON，UTF-8）。
+    v2：支持 CUSTOM 自定义尺寸与 margins 边距；v1 文件仍可读取。
+    """
+    paper = paper.upper()
+    doc = {'v': MAP_PAYLOAD_VERSION, 'paper': paper, 'cols': int(cols)}
+    if paper == 'CUSTOM' and width and height:
+        doc['width'] = int(width)
+        doc['height'] = int(height)
+    if margins:
+        clean = {}
+        for key in ('l', 't', 'r', 'b'):
+            if key in margins:
+                clean[key] = int(margins[key])
+        if clean:
+            doc['margins'] = clean
     return json.dumps(doc, ensure_ascii=False).encode('utf-8')
 def parse_hex_map_payload(payload: bytes):
-    """解析画布文档负载；不是合法画布文档时返回 None。"""
+    """解析画布文档负载；不是合法画布文档时返回 None。
+    返回 dict：paper、cols、width、height、margins。
+    """
     try:
         doc = json.loads(payload.decode('utf-8'))
-        if doc.get('v') != MAP_PAYLOAD_VERSION:
+        version = doc.get('v')
+        if version not in (1, 2):
             return None
         paper = str(doc.get('paper', '')).upper()
         cols = int(doc.get('cols', 0))
-        if paper not in PAPER_SIZES_MM or cols < 1:
+        if cols < 1:
             return None
-        return {'paper': paper, 'cols': cols}
+        margins = {}
+        raw_margins = doc.get('margins') or {}
+        for key in ('l', 't', 'r', 'b'):
+            if key in raw_margins:
+                margins[key] = int(raw_margins[key])
+        if paper == 'CUSTOM':
+            width = int(doc.get('width', 0))
+            height = int(doc.get('height', 0))
+            if width >= 1 and height >= 1:
+                return {'paper': paper, 'cols': cols, 'width': width, 'height': height, 'margins': margins}
+            return None
+        if paper not in PAPER_SIZES_MM:
+            return None
+        return {'paper': paper, 'cols': cols, 'width': None, 'height': None, 'margins': margins}
     except Exception:
         return None
