@@ -38,6 +38,7 @@ from System.Windows.Forms import (
     ToolStripMenuItem,
     ToolStripSeparator,
     ToolStripStatusLabel,
+    Timer,
     TrackBar,
 )
 from System.Drawing import Bitmap, Color, Font, Graphics, Pen, Point, PointF, Size
@@ -85,6 +86,9 @@ class HexEditorApp:
         self.map_cols = DEFAULT_COLS
         self._syncing = False
         self._grid_bitmap = None
+        self._render_timer = Timer()
+        self._render_timer.Interval = 120
+        self._render_timer.Tick += self.on_render_timer_tick
         self.form = Form()
         self.form.Text = '未命名 - Hex Editor'
         self.form.Size = Size(960, 640)
@@ -219,9 +223,12 @@ class HexEditorApp:
         self.cols_box.Text = str(self.map_cols)
         self.cols_track.Value = self.map_cols
         self._syncing = False
-        self.render_grid_bitmap()
+        if self._grid_bitmap is not None:
+            self._grid_bitmap.Dispose()
+            self._grid_bitmap = None
         self.canvas_box.Invalidate()
         self.update_map_info()
+        self.schedule_render()
         self.update_title()
     def update_map_info(self):
         if self.mode != 'map':
@@ -257,9 +264,23 @@ class HexEditorApp:
         self.cols_box.Text = str(val)
         self.cols_track.Value = val
         self._syncing = False
+        self.update_map_info()
+        self.schedule_render()
+    def schedule_render(self):
+        if self.mode != 'map':
+            return
+        if self._render_timer.Enabled:
+            self._render_timer.Stop()
+        self._render_timer.Start()
+
+    def on_render_timer_tick(self, sender, e):
+        self._render_timer.Stop()
+        if self.mode != 'map':
+            return
         self.render_grid_bitmap()
         self.canvas_box.Invalidate()
         self.update_map_info()
+
     def render_grid_bitmap(self):
         if self.mode != 'map':
             return
