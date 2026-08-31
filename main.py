@@ -17,6 +17,7 @@ from System.Windows.Forms import (
     Button,
     ComboBox,
     ComboBoxStyle,
+    Control,
     DialogResult,
     DockStyle,
     Form,
@@ -43,7 +44,7 @@ from System.Windows.Forms import (
 )
 from System.Threading import ApartmentState, Thread, ThreadStart
 from System.Drawing import Bitmap, Color, Font, Graphics, Pen, Point, PointF, Rectangle, Size
-from System.Drawing.Drawing2D import GraphicsPath
+from System.Drawing.Drawing2D import GraphicsPath, InterpolationMode
 import System
 from hexformat import (
     MAP_TYPE,
@@ -76,6 +77,9 @@ PAPER_LABELS = [
 MIN_COLS = 1
 MAX_COLS = 100
 DEFAULT_COLS = 12
+MIN_ZOOM = 0.1
+MAX_ZOOM = 8.0
+ZOOM_STEP = 1.25
 class HexEditorApp:
     """主窗口应用。"""
     def __init__(self):
@@ -92,6 +96,7 @@ class HexEditorApp:
         self.map_margins = {}
         self._syncing = False
         self._grid_bitmap = None
+        self.zoom = 1.0
         self._render_timer = Timer()
         self._render_timer.Interval = 120
         self._render_timer.Tick += self.on_render_timer_tick
@@ -131,11 +136,25 @@ class HexEditorApp:
         file_menu.DropDownItems.Add(export_item)
         file_menu.DropDownItems.Add(ToolStripSeparator())
         file_menu.DropDownItems.Add(exit_item)
+        view_menu = ToolStripMenuItem('视图')
+        zoom_in_item = ToolStripMenuItem('放大')
+        zoom_in_item.ShortcutKeys = Keys.Control | Keys.Oemplus
+        zoom_in_item.Click += self.on_zoom_in
+        zoom_out_item = ToolStripMenuItem('缩小')
+        zoom_out_item.ShortcutKeys = Keys.Control | Keys.OemMinus
+        zoom_out_item.Click += self.on_zoom_out
+        zoom_reset_item = ToolStripMenuItem('实际大小')
+        zoom_reset_item.ShortcutKeys = Keys.Control | Keys.D0
+        zoom_reset_item.Click += self.on_zoom_reset
+        view_menu.DropDownItems.Add(zoom_in_item)
+        view_menu.DropDownItems.Add(zoom_out_item)
+        view_menu.DropDownItems.Add(zoom_reset_item)
         help_menu = ToolStripMenuItem('帮助')
         about_item = ToolStripMenuItem('关于')
         about_item.Click += self.show_about
         help_menu.DropDownItems.Add(about_item)
         menubar.Items.Add(file_menu)
+        menubar.Items.Add(view_menu)
         menubar.Items.Add(help_menu)
         self.form.MainMenuStrip = menubar
         self.form.Controls.Add(menubar)
@@ -153,7 +172,7 @@ class HexEditorApp:
         # 六角格画布顶部栏：横向格子数输入框 + 下方滑块
         self.top_bar = Panel()
         self.top_bar.Dock = DockStyle.Top
-        self.top_bar.Height = 118
+        self.top_bar.Height = 152
         self.top_bar.Padding = Padding(8, 4, 8, 4)
         self.cols_label = Label()
         self.cols_label.Text = '横向格子数：'
@@ -189,9 +208,32 @@ class HexEditorApp:
         self.confirm_button.Size = Size(150, 28)
         self.confirm_button.Click += self.confirm_and_save
         self.top_bar.Controls.Add(self.confirm_button)
+        self.zoom_out_button = Button()
+        self.zoom_out_button.Text = '缩小'
+        self.zoom_out_button.Location = Point(438, 72)
+        self.zoom_out_button.Size = Size(44, 28)
+        self.zoom_out_button.Click += self.on_zoom_out
+        self.top_bar.Controls.Add(self.zoom_out_button)
+        self.zoom_in_button = Button()
+        self.zoom_in_button.Text = '放大'
+        self.zoom_in_button.Location = Point(488, 72)
+        self.zoom_in_button.Size = Size(44, 28)
+        self.zoom_in_button.Click += self.on_zoom_in
+        self.top_bar.Controls.Add(self.zoom_in_button)
+        self.zoom_reset_button = Button()
+        self.zoom_reset_button.Text = '100%'
+        self.zoom_reset_button.Location = Point(538, 72)
+        self.zoom_reset_button.Size = Size(56, 28)
+        self.zoom_reset_button.Click += self.on_zoom_reset
+        self.top_bar.Controls.Add(self.zoom_reset_button)
+        self.zoom_label = Label()
+        self.zoom_label.AutoSize = True
+        self.zoom_label.Text = '100%'
+        self.zoom_label.Location = Point(602, 78)
+        self.top_bar.Controls.Add(self.zoom_label)
         self.map_info_label = Label()
         self.map_info_label.AutoSize = True
-        self.map_info_label.Location = Point(440, 78)
+        self.map_info_label.Location = Point(12, 112)
         self.top_bar.Controls.Add(self.map_info_label)
         # 六角格画布（可滚动）
         self.canvas_scroll = Panel()
@@ -201,6 +243,7 @@ class HexEditorApp:
         self.canvas_box.SizeMode = PictureBoxSizeMode.Normal
         self.canvas_box.BackColor = Color.White
         self.canvas_box.Paint += self.on_canvas_paint
+        self.canvas_box.MouseWheel += self.on_canvas_mouse_wheel
         self.canvas_scroll.Controls.Add(self.canvas_box)
         self.top_bar.Visible = False
         self.canvas_scroll.Visible = False
@@ -236,7 +279,7 @@ class HexEditorApp:
         self.map_height = height
         self.map_margins = margins or {}
         w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
-        self.canvas_box.Size = Size(w, h)
+        self.canvas_box.Size = Size(max(1, round(w * self.zoom)), max(1, round(h * self.zoom)))
         self.text_box.Visible = False
         self.canvas_scroll.Visible = True
         self.top_bar.Visible = True
@@ -353,14 +396,48 @@ class HexEditorApp:
         g.Clear(Color.White)
         if self.mode != 'map' or self._grid_bitmap is None:
             return
-        g.DrawImageUnscaled(self._grid_bitmap, 0, 0)
+        w = self.canvas_box.Width
+        h = self.canvas_box.Height
+        if w != self._grid_bitmap.Width or h != self._grid_bitmap.Height:
+            g.InterpolationMode = InterpolationMode.NearestNeighbor
+            g.DrawImage(self._grid_bitmap, 0, 0, w, h)
+        else:
+            g.DrawImageUnscaled(self._grid_bitmap, 0, 0)
+    def set_zoom(self, zoom):
+        zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(zoom)))
+        if abs(zoom - self.zoom) < 0.001:
+            return
+        self.zoom = zoom
+        if self.mode == 'map':
+            w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
+            self.canvas_box.Size = Size(max(1, round(w * self.zoom)), max(1, round(h * self.zoom)))
+            self.canvas_box.Invalidate()
+        self.zoom_label.Text = f'{int(round(self.zoom * 100))}%'
+
+    def on_zoom_in(self, sender=None, e=None):
+        self.set_zoom(self.zoom * ZOOM_STEP)
+
+    def on_zoom_out(self, sender=None, e=None):
+        self.set_zoom(self.zoom / ZOOM_STEP)
+
+    def on_zoom_reset(self, sender=None, e=None):
+        self.set_zoom(1.0)
+
+    def on_canvas_mouse_wheel(self, sender, e):
+        if (Control.ModifierKeys & Keys.Control) != 0:
+            if e.Delta > 0:
+                self.on_zoom_in()
+            else:
+                self.on_zoom_out()
+            e.Handled = True
+
     # ---------- 菜单事件 ----------
     def close_app(self, sender=None, e=None):
         self.form.Close()
     def show_about(self, sender=None, e=None):
         MessageBox.Show(
             self.form,
-            'Hex Editor\n版本 0.7（Python）\n'
+            'Hex Editor\n版本 0.8（Python）\n'
             '创建/保存 .hex 文件；六角格画布支持 A1-A4 纸张与正六边形平铺',
             '关于',
         )
