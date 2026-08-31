@@ -40,7 +40,7 @@ from System.Windows.Forms import (
     ToolStripStatusLabel,
     TrackBar,
 )
-from System.Drawing import Color, Font, Pen, Point, PointF, Size
+from System.Drawing import Bitmap, Color, Font, Graphics, Pen, Point, PointF, Size
 from System.Drawing.Drawing2D import GraphicsPath
 import System
 from hexformat import (
@@ -84,6 +84,7 @@ class HexEditorApp:
         self.map_paper = 'A4'
         self.map_cols = DEFAULT_COLS
         self._syncing = False
+        self._grid_bitmap = None
         self.form = Form()
         self.form.Text = '未命名 - Hex Editor'
         self.form.Size = Size(960, 640)
@@ -96,11 +97,8 @@ class HexEditorApp:
     def _build_menu(self):
         menubar = MenuStrip()
         file_menu = ToolStripMenuItem('文件')
-        new_item = ToolStripMenuItem('新建')
-        new_item.ShortcutKeys = Keys.Control | Keys.N
-        new_item.Click += self.new_file
         new_map_item = ToolStripMenuItem('新建六角格画布...')
-        new_map_item.ShortcutKeys = Keys.Control | Keys.Shift | Keys.N
+        new_map_item.ShortcutKeys = Keys.Control | Keys.N
         new_map_item.Click += self.new_hex_map
         open_item = ToolStripMenuItem('打开文件...')
         open_item.ShortcutKeys = Keys.Control | Keys.O
@@ -116,7 +114,6 @@ class HexEditorApp:
         export_item.Click += self.export_original
         exit_item = ToolStripMenuItem('退出')
         exit_item.Click += self.close_app
-        file_menu.DropDownItems.Add(new_item)
         file_menu.DropDownItems.Add(new_map_item)
         file_menu.DropDownItems.Add(open_item)
         file_menu.DropDownItems.Add(save_item)
@@ -222,6 +219,7 @@ class HexEditorApp:
         self.cols_box.Text = str(self.map_cols)
         self.cols_track.Value = self.map_cols
         self._syncing = False
+        self.render_grid_bitmap()
         self.canvas_box.Invalidate()
         self.update_map_info()
         self.update_title()
@@ -259,50 +257,54 @@ class HexEditorApp:
         self.cols_box.Text = str(val)
         self.cols_track.Value = val
         self._syncing = False
+        self.render_grid_bitmap()
         self.canvas_box.Invalidate()
         self.update_map_info()
+    def render_grid_bitmap(self):
+        if self.mode != 'map':
+            return
+        self.form.UseWaitCursor = True
+        try:
+            w, h = paper_size_pixels(self.map_paper)
+            bmp = Bitmap(w, h)
+            g = Graphics.FromImage(bmp)
+            try:
+                g.Clear(Color.White)
+                layout = hex_layout(self.map_cols, w, h)
+                size = layout['cell_size']
+                path = GraphicsPath()
+                for _q, _r, cx, cy in layout['centers']:
+                    pts = [PointF(p[0], p[1]) for p in hex_corners(cx, cy, size)]
+                    path.AddPolygon(pts)
+                pen = Pen(Color.FromArgb(170, 90, 90, 90), 1.0)
+                g.DrawPath(pen, path)
+                pen.Dispose()
+                path.Dispose()
+            finally:
+                g.Dispose()
+            if self._grid_bitmap is not None:
+                self._grid_bitmap.Dispose()
+            self._grid_bitmap = bmp
+        finally:
+            self.form.UseWaitCursor = False
+
     def on_canvas_paint(self, sender, e):
         g = e.Graphics
         g.Clear(Color.White)
-        if self.mode != 'map':
+        if self.mode != 'map' or self._grid_bitmap is None:
             return
-        w = self.canvas_box.Width
-        h = self.canvas_box.Height
-        if w < 1 or h < 1:
-            return
-        layout = hex_layout(self.map_cols, w, h)
-        size = layout['cell_size']
-        path = GraphicsPath()
-        for _q, _r, cx, cy in layout['centers']:
-            pts = [PointF(p[0], p[1]) for p in hex_corners(cx, cy, size)]
-            path.AddPolygon(pts)
-        pen = Pen(Color.FromArgb(170, 90, 90, 90), 1.0)
-        g.DrawPath(pen, path)
-        pen.Dispose()
-        path.Dispose()
+        g.DrawImageUnscaled(self._grid_bitmap, 0, 0)
     # ---------- 菜单事件 ----------
     def close_app(self, sender=None, e=None):
         self.form.Close()
     def show_about(self, sender=None, e=None):
         MessageBox.Show(
             self.form,
-            'Hex Editor\n版本 0.5（Python）\n'
+            'Hex Editor\n版本 0.6（Python）\n'
             '创建/保存 .hex 文件；六角格画布支持 A1-A4 纸张与正六边形平铺',
             '关于',
         )
     # ---------- 文件操作 ----------
-    def new_file(self, sender=None, e=None):
-        self.file_bytes = b''
-        self.file_path = None
-        self.original_type = 'BIN'
-        self.is_hex_file = False
-        self.mode = 'hex'
-        self.canvas_scroll.Visible = False
-        self.top_bar.Visible = False
-        self.text_box.Visible = True
-        self.update_title()
-        self.text_box.Text = '新建文件已就绪。\r\n保存时默认生成 .hex 文件，用于存储特定类型的文件。'
-        self.set_status('已新建文件（未保存，默认类型 BIN）')
     def _choose_paper_size(self):
         dlg = Form()
         dlg.Text = '新建六角格画布 - 选择纸张尺寸'
