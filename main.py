@@ -31,6 +31,7 @@ from System.Windows.Forms import (
     Control,
     DialogResult,
     DockStyle,
+    FlatStyle,
     Form,
     FormBorderStyle,
     FormStartPosition,
@@ -38,6 +39,7 @@ from System.Windows.Forms import (
     Label,
     MenuStrip,
     MessageBox,
+    MouseButtons,
     OpenFileDialog,
     Padding,
     Panel,
@@ -54,7 +56,7 @@ from System.Windows.Forms import (
     TrackBar,
 )
 from System.Threading import ApartmentState, Thread, ThreadStart
-from System.Drawing import Bitmap, Color, Font, Graphics, Pen, Point, PointF, Rectangle, Size
+from System.Drawing import Bitmap, Color, Font, FontStyle, Graphics, Pen, Point, PointF, Rectangle, Size, SolidBrush
 from System.Drawing.Drawing2D import GraphicsPath, InterpolationMode
 import System
 from hexformat import (
@@ -69,7 +71,7 @@ from hexformat import (
     parse_hex_map_payload,
     read_hex_container,
 )
-from hexmap import HexMap, normalize_margins
+from hexmap import TERRAIN_NAMES, TERRAINS, HexMap, normalize_margins
 try:
     from imagedetect import detect_hex_grid
 except Exception:
@@ -99,6 +101,7 @@ MIN_ZOOM = 0.1
 MAX_ZOOM = 8.0
 ZOOM_STEP = 1.25
 GRID_PEN_WIDTH = 2.0
+CLEAR_TERRAIN = '__clear__'
 class HexEditorApp:
     """主窗口应用。"""
     def __init__(self):
@@ -114,8 +117,11 @@ class HexEditorApp:
         self.map_height = None
         self.map_margins = {}
         self._syncing = False
-        self._grid_path = None
+        self._grid_paths = {}          # 地形 -> 网格路径（按显示尺寸生成）
+        self._selected_path = None     # 选中格子的高亮路径
         self.hex_map = None
+        self.selected_cell_id = None
+        self.active_terrain = None
         self.zoom = 1.0
         self._render_timer = Timer()
         self._render_timer.Interval = 120
@@ -264,11 +270,92 @@ class HexEditorApp:
         self.canvas_box.BackColor = Color.White
         self.canvas_box.Paint += self.on_canvas_paint
         self.canvas_box.MouseWheel += self.on_canvas_mouse_wheel
+        self.canvas_box.MouseDown += self.on_canvas_mouse_down
         self.canvas_scroll.Controls.Add(self.canvas_box)
         self.top_bar.Visible = False
         self.canvas_scroll.Visible = False
+        # 左侧属性栏：给格子设置地形
+        self.side_panel = Panel()
+        self.side_panel.Dock = DockStyle.Left
+        self.side_panel.Width = 172
+        side_title = Label()
+        side_title.Text = '格子属性'
+        side_title.Font = Font('Microsoft YaHei UI', 10, FontStyle.Bold)
+        side_title.Location = Point(10, 8)
+        side_title.AutoSize = True
+        self.side_panel.Controls.Add(side_title)
+        self.terrain_buttons = {}
+        next_y = 38
+        for terrain_name in TERRAIN_NAMES:
+            info = TERRAINS[terrain_name]
+            button = Button()
+            button.Text = '%s（消耗 %d / 修正 %d）' % (terrain_name, info['move_cost'], info['modifier'])
+            button.Location = Point(10, next_y)
+            button.Size = Size(150, 30)
+            button.FlatStyle = FlatStyle.Flat
+            red, green, blue = info['color']
+            button.BackColor = Color.FromArgb(red, green, blue)
+            if red + green + blue < 400:
+                button.ForeColor = Color.White
+            button.Click += self.on_terrain_button
+            self.side_panel.Controls.Add(button)
+            self.terrain_buttons[terrain_name] = button
+            next_y += 34
+        self.clear_button = Button()
+        self.clear_button.Text = '清除地形'
+        self.clear_button.Location = Point(10, next_y)
+        self.clear_button.Size = Size(150, 30)
+        self.clear_button.FlatStyle = FlatStyle.Flat
+        self.clear_button.Click += self.on_terrain_clear_button
+        self.side_panel.Controls.Add(self.clear_button)
+        next_y += 44
+        sel_title = Label()
+        sel_title.Text = '选中格子'
+        sel_title.Font = Font('Microsoft YaHei UI', 10, FontStyle.Bold)
+        sel_title.Location = Point(10, next_y)
+        sel_title.AutoSize = True
+        self.side_panel.Controls.Add(sel_title)
+        next_y += 26
+        self.sel_id_label = Label()
+        self.sel_id_label.Location = Point(10, next_y)
+        self.sel_id_label.AutoSize = True
+        self.side_panel.Controls.Add(self.sel_id_label)
+        next_y += 22
+        self.sel_pos_label = Label()
+        self.sel_pos_label.Location = Point(10, next_y)
+        self.sel_pos_label.AutoSize = True
+        self.side_panel.Controls.Add(self.sel_pos_label)
+        next_y += 22
+        self.terrain_label = Label()
+        self.terrain_label.Location = Point(10, next_y)
+        self.terrain_label.AutoSize = True
+        self.side_panel.Controls.Add(self.terrain_label)
+        next_y += 22
+        self.cost_label = Label()
+        self.cost_label.Location = Point(10, next_y)
+        self.cost_label.AutoSize = True
+        self.side_panel.Controls.Add(self.cost_label)
+        next_y += 22
+        self.modifier_label = Label()
+        self.modifier_label.Location = Point(10, next_y)
+        self.modifier_label.AutoSize = True
+        self.side_panel.Controls.Add(self.modifier_label)
+        next_y += 30
+        self.terrain_stats_label = Label()
+        self.terrain_stats_label.Location = Point(10, next_y)
+        self.terrain_stats_label.AutoSize = True
+        self.side_panel.Controls.Add(self.terrain_stats_label)
+        next_y += 30
+        hint = Label()
+        hint.Text = '先选地形，再点击画布上的格子'
+        hint.Location = Point(10, next_y)
+        hint.AutoSize = True
+        hint.ForeColor = Color.FromArgb(110, 110, 110)
+        self.side_panel.Controls.Add(hint)
+        self.side_panel.Visible = False
         self.form.Controls.Add(self.top_bar)
         self.form.Controls.Add(self.canvas_scroll)
+        self.form.Controls.Add(self.side_panel)
     def _build_status_bar(self):
         self.status_bar = StatusStrip()
         self.status_label = ToolStripStatusLabel('就绪')
@@ -286,6 +373,7 @@ class HexEditorApp:
         self.mode = 'hex'
         self.top_bar.Visible = False
         self.canvas_scroll.Visible = False
+        self.side_panel.Visible = False
         self.text_box.Visible = True
         if len(self.file_bytes) == 0:
             self.text_box.Text = '（空文件）\r\n保存时默认生成 .hex 文件，用于存储特定类型的文件。'
@@ -303,15 +391,16 @@ class HexEditorApp:
         self.text_box.Visible = False
         self.canvas_scroll.Visible = True
         self.top_bar.Visible = True
+        self.side_panel.Visible = True
         self._syncing = True
         self.cols_box.Text = str(self.map_cols)
         self.cols_track.Value = self.map_cols
         self._syncing = False
-        if self._grid_path is not None:
-            self._grid_path.Dispose()
-            self._grid_path = None
+        self.clear_grid_paths()
+        self.selected_cell_id = None
         self.canvas_box.Invalidate()
         self.rebuild_hex_map()
+        self.update_cell_info()
         self.update_map_info()
         self.schedule_render()
         self.update_title()
@@ -339,8 +428,9 @@ class HexEditorApp:
         )
     def current_payload_and_type(self):
         if self.mode == 'map':
+            terrains = self.hex_map.terrain_map() if self.hex_map is not None else None
             return make_hex_map_payload(
-                self.map_paper, self.map_cols, self.map_width, self.map_height, self.map_margins
+                self.map_paper, self.map_cols, self.map_width, self.map_height, self.map_margins, terrains
             ), MAP_TYPE
         return self.file_bytes, self.original_type
     # ---------- 六角格画布事件 ----------
@@ -398,6 +488,7 @@ class HexEditorApp:
         if self.mode != 'map':
             return
         if self.rebuild_hex_map() and self.hex_map is not None:
+            self.update_cell_info()
             stats = self.hex_map.summary()
             self.set_status(
                 '画布就绪：%d 个格子，%d 条相邻边（连通：%s）'
@@ -407,33 +498,54 @@ class HexEditorApp:
         self.canvas_box.Invalidate()
         self.update_map_info()
 
+    def clear_grid_paths(self):
+        for path in self._grid_paths.values():
+            path.Dispose()
+        self._grid_paths = {}
+        if self._selected_path is not None:
+            self._selected_path.Dispose()
+            self._selected_path = None
+
+    def _update_selected_path(self):
+        old = self._selected_path
+        self._selected_path = None
+        if old is not None:
+            old.Dispose()
+        if self.hex_map is None or self.selected_cell_id is None:
+            return
+        cell = self.hex_map.cells.get(self.selected_cell_id)
+        if cell is None:
+            return
+        zoom = self.zoom
+        path = GraphicsPath()
+        path.AddPolygon([PointF(cx * zoom, cy * zoom) for cx, cy in cell.corners()])
+        self._selected_path = path
+
     def render_grid_path(self):
-        if self.mode != 'map':
+        """按地形分组生成网格路径（坐标按当前缩放换算到显示尺寸）。"""
+        if self.mode != 'map' or self.hex_map is None:
             return
         self.form.UseWaitCursor = True
         try:
-            w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
-            dw = max(1, round(w * self.zoom))
-            dh = max(1, round(h * self.zoom))
-            scale_margins = {}
-            for key in ('l', 't', 'r', 'b'):
-                scale_margins[key] = max(0, int(round(self.map_margins.get(key, 0) * self.zoom)))
-            layout = hex_layout(self.map_cols, dw, dh, scale_margins)
-            size = layout['cell_size']
-            path = GraphicsPath()
-            for _q, _r, cx, cy in layout['centers']:
-                pts = [PointF(p[0], p[1]) for p in hex_corners(cx, cy, size)]
-                path.AddPolygon(pts)
-            if self._grid_path is not None:
-                self._grid_path.Dispose()
-            self._grid_path = path
+            zoom = self.zoom
+            paths = {}
+            for cell in self.hex_map.cells.values():
+                key = cell.terrain or ''
+                path = paths.get(key)
+                if path is None:
+                    path = GraphicsPath()
+                    paths[key] = path
+                path.AddPolygon([PointF(cx * zoom, cy * zoom) for cx, cy in cell.corners()])
+            self.clear_grid_paths()
+            self._grid_paths = paths
+            self._update_selected_path()
         finally:
             self.form.UseWaitCursor = False
 
     def on_canvas_paint(self, sender, e):
         g = e.Graphics
         g.Clear(Color.White)
-        if self.mode != 'map' or self._grid_path is None:
+        if self.mode != 'map' or not self._grid_paths:
             return
         ml = max(0, int(round(self.map_margins.get('l', 0) * self.zoom)))
         mr = max(0, int(round(self.map_margins.get('r', 0) * self.zoom)))
@@ -441,9 +553,95 @@ class HexEditorApp:
         mb = max(0, int(round(self.map_margins.get('b', 0) * self.zoom)))
         if ml or mr or mt or mb:
             g.SetClip(Rectangle(ml, mt, max(1, self.canvas_box.Width - ml - mr), max(1, self.canvas_box.Height - mt - mb)))
+        for key, path in self._grid_paths.items():
+            info = TERRAINS.get(key)
+            if info is None:
+                continue
+            red, green, blue = info['color']
+            brush = SolidBrush(Color.FromArgb(red, green, blue))
+            g.FillPath(brush, path)
+            brush.Dispose()
         pen = Pen(Color.FromArgb(170, 90, 90, 90), GRID_PEN_WIDTH)
-        g.DrawPath(pen, self._grid_path)
+        for path in self._grid_paths.values():
+            g.DrawPath(pen, path)
         pen.Dispose()
+        if self._selected_path is not None:
+            sel_pen = Pen(Color.FromArgb(255, 210, 40, 40), GRID_PEN_WIDTH + 1.0)
+            g.DrawPath(sel_pen, self._selected_path)
+            sel_pen.Dispose()
+
+    # ---------- 地形属性 ----------
+    def on_terrain_button(self, sender, e):
+        text = sender.Text
+        for name in TERRAIN_NAMES:
+            if text.startswith(name):
+                self._set_active_terrain(name)
+                return
+
+    def on_terrain_clear_button(self, sender=None, e=None):
+        self._set_active_terrain(CLEAR_TERRAIN)
+
+    def _set_active_terrain(self, name):
+        self.active_terrain = name or None
+        for terrain_name, button in self.terrain_buttons.items():
+            active = (terrain_name == self.active_terrain)
+            button.FlatAppearance.BorderSize = 3 if active else 1
+        self.clear_button.FlatAppearance.BorderSize = 3 if self.active_terrain == CLEAR_TERRAIN else 1
+        if self.active_terrain is None:
+            self.set_status('已取消地形选择：点击格子只查看属性')
+        elif self.active_terrain == CLEAR_TERRAIN:
+            self.set_status('清除模式：点击画布上的格子可清除地形')
+        else:
+            info = TERRAINS[self.active_terrain]
+            self.set_status('当前地形：%s（移动力消耗 %d，地形修正 %d）——点击画布上的格子进行设置'
+                            % (self.active_terrain, info['move_cost'], info['modifier']))
+
+    def on_canvas_mouse_down(self, sender, e):
+        if self.mode != 'map' or self.hex_map is None:
+            return
+        if e.Button != MouseButtons.Left:
+            return
+        cell = self.hex_map.cell_at_point(e.X / self.zoom, e.Y / self.zoom)
+        if cell is None:
+            return
+        changed = False
+        if self.active_terrain is None:
+            pass
+        elif self.active_terrain == CLEAR_TERRAIN:
+            changed = cell.terrain is not None
+            cell.clear_terrain()
+        else:
+            changed = cell.terrain != self.active_terrain
+            cell.set_terrain(self.active_terrain)
+        self.selected_cell_id = cell.id
+        self.update_cell_info()
+        if changed:
+            self.schedule_render()
+        else:
+            self._update_selected_path()
+        self.canvas_box.Invalidate()
+        self.set_status('编号 #%d：列 %d 行 %d，地形 %s' % (
+            cell.id, cell.q, cell.r, cell.terrain or '空地'))
+
+    def update_cell_info(self):
+        cell = None
+        if self.hex_map is not None and self.selected_cell_id is not None:
+            cell = self.hex_map.cells.get(self.selected_cell_id)
+        if cell is None:
+            self.sel_id_label.Text = '编号：-'
+            self.sel_pos_label.Text = '坐标：-'
+            self.terrain_label.Text = '地形：-'
+            self.cost_label.Text = '移动力消耗：-'
+            self.modifier_label.Text = '地形修正：-'
+        else:
+            self.sel_id_label.Text = '编号：#%d' % cell.id
+            self.sel_pos_label.Text = '坐标：列 %d / 行 %d' % (cell.q, cell.r)
+            self.terrain_label.Text = '地形：%s' % (cell.terrain or '空地')
+            self.cost_label.Text = '移动力消耗：%s' % ('-' if cell.move_cost is None else cell.move_cost)
+            self.modifier_label.Text = '地形修正：%s' % ('-' if cell.terrain_modifier is None else cell.terrain_modifier)
+        counts = self.hex_map.terrain_counts() if self.hex_map is not None else {}
+        parts = ['%s %d' % (name, counts.get(name, 0)) for name in TERRAIN_NAMES]
+        self.terrain_stats_label.Text = '统计：' + ' / '.join(parts)
     def set_zoom(self, zoom):
         zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(zoom)))
         if abs(zoom - self.zoom) < 0.001:
@@ -479,7 +677,7 @@ class HexEditorApp:
     def show_about(self, sender=None, e=None):
         MessageBox.Show(
             self.form,
-            'Hex Editor\n版本 1.0（Python）\n'
+            'Hex Editor\n版本 1.1（Python）\n'
             '创建/保存 .hex 文件；六角格画布支持 A1-A4 纸张与正六边形平铺',
             '关于',
         )
@@ -599,9 +797,15 @@ class HexEditorApp:
                     self.show_canvas(
                         map_doc['paper'], map_doc['cols'], map_doc['width'], map_doc['height'], map_doc['margins']
                     )
+                    terrain_count = 0
+                    if map_doc.get('terrains') and self.hex_map is not None:
+                        terrain_count = self.hex_map.apply_terrains(map_doc['terrains'])
+                        self.update_cell_info()
+                        self.schedule_render()
                     w, h = map_canvas_size(map_doc['paper'], map_doc['width'], map_doc['height'])
                     self.set_status(
-                        f'已打开六角格画布：{map_doc["paper"]}，{map_doc["cols"]} 列（{w}×{h} px）'
+                        f'已打开六角格画布：{map_doc["paper"]}，{map_doc["cols"]} 列（{w}×{h} px），'
+                        f'已恢复 {terrain_count} 个格子的地形'
                     )
                     return
                 self.file_bytes = info['payload']

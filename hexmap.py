@@ -1,20 +1,30 @@
 """hexmap.py - 六角格单元与地图图结构（纯逻辑，不依赖界面）
 
-- HexCell：一个格子，记录编号、行列坐标 (q, r)、中心坐标、自定义属性 attrs，
-  以及与之相邻的格子编号。
+- HexCell：一个格子。记录编号、行列坐标 (q, r)、中心坐标、三个地形属性
+  （地形名字 terrain、移动力消耗 move_cost、地形修正 terrain_modifier），
+  以及相邻的格子。
 - HexMap：整张地图的格子集合。格子按行优先从 1 开始连续编号；
-  相邻的六角格之间互相连接，形成一张无向图（沿边相邻，每个格子最多 6 个邻居，
-  边缘格子会少一些）。
+  相邻的六角格互相连接，形成一张无向图（每个格子最多 6 个邻居，边缘更少）。
 
-平顶六角格、奇数列下移半行（odd-q）的邻居偏移：
-偶数列与奇数列的偏移不同，边缘超出地图的邻居会被忽略。
+地形定义见 TERRAINS：树林（绿）、山地（棕）、城市（黑）。
+移动力消耗 / 地形修正只是默认值，可按需修改这张表。
 """
+import math
+
 from hexformat import hex_corners, hex_layout
 
 DIRECTIONS = ('N', 'NE', 'SE', 'S', 'SW', 'NW')
 _MARGIN_KEYS = ('l', 't', 'r', 'b')
 _OFFSETS_EVEN = ((0, -1), (1, -1), (1, 0), (0, 1), (-1, 0), (-1, -1))
 _OFFSETS_ODD = ((0, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0))
+
+# 地形表：名字 -> 颜色(RGB)、默认移动力消耗、默认地形修正
+TERRAINS = {
+    '树林': {'name': '树林', 'color': (60, 150, 70), 'move_cost': 2, 'modifier': -1},
+    '山地': {'name': '山地', 'color': (150, 105, 60), 'move_cost': 3, 'modifier': -2},
+    '城市': {'name': '城市', 'color': (0, 0, 0), 'move_cost': 1, 'modifier': -3},
+}
+TERRAIN_NAMES = ('树林', '山地', '城市')
 
 
 def neighbor_offsets(q):
@@ -28,8 +38,16 @@ def normalize_margins(margins):
     return {key: max(0, int(margins.get(key, 0))) for key in _MARGIN_KEYS}
 
 
+def terrain_color(name):
+    """地形颜色（RGB），未设置地形返回 None。"""
+    info = TERRAINS.get(name)
+    if info is None:
+        return None
+    return info['color']
+
+
 class HexCell:
-    """一个六角格：编号、坐标、几何与自定义属性。"""
+    """一个六角格：编号、坐标、几何、地形属性与相邻关系。"""
 
     def __init__(self, cell_id, q, r, cx, cy, cell_size):
         self.id = int(cell_id)          # 编号（从 1 开始，按行从左到右）
@@ -38,13 +56,15 @@ class HexCell:
         self.cx = float(cx)             # 中心 x
         self.cy = float(cy)             # 中心 y
         self.cell_size = float(cell_size)
-        self.neighbors = []             # 相邻格子编号（含全部存在的邻居）
-        self.neighbor_map = {}          # 方向 -> 相邻格子编号（边界上缺失的方向不出现）
-        self.attrs = {}                 # 自定义属性：颜色、文字、占用情况等
+        self.neighbors = []             # 相邻格子编号
+        self.neighbor_map = {}          # 方向 -> 相邻格子编号（边界缺失的方向不出现）
+        self.attrs = {}                 # 其它自定义属性
+        self.terrain = None             # 地形名字（None 表示空地）
+        self.move_cost = None           # 移动力消耗
+        self.terrain_modifier = None    # 地形修正
 
     @property
     def number(self):
-        """格子编号（与 id 相同）。"""
         return self.id
 
     @property
@@ -52,10 +72,48 @@ class HexCell:
         """相邻格子数量（0-6）。"""
         return len(self.neighbors)
 
+    @property
+    def is_empty(self):
+        """是否是未设置地形的空地。"""
+        return self.terrain is None
+
     def corners(self):
         """该格 6 个顶点的坐标列表。"""
         return hex_corners(self.cx, self.cy, self.cell_size)
 
+    def set_terrain(self, name, move_cost=None, modifier=None):
+        """设置地形，并套用该地形的默认移动力消耗与地形修正。
+
+        name 为 None 或不在 TERRAINS 中时清空地形；
+        传入 move_cost / modifier 可覆盖默认值（用于单个格子的特殊调整）。
+        """
+        info = TERRAINS.get(name)
+        if info is None:
+            self.terrain = None
+            self.move_cost = None
+            self.terrain_modifier = None
+        else:
+            self.terrain = info['name']
+            self.move_cost = info['move_cost'] if move_cost is None else int(move_cost)
+            self.terrain_modifier = info['modifier'] if modifier is None else int(modifier)
+        return self
+
+    def clear_terrain(self):
+        """把格子恢复成空地。"""
+        return self.set_terrain(None)
+
+    def terrain_info(self):
+        """三个地形属性的当前值。"""
+        return {
+            'terrain': self.terrain,
+            'move_cost': self.move_cost,
+            'terrain_modifier': self.terrain_modifier,
+        }
+
+    def terrain_color(self):
+        return terrain_color(self.terrain)
+
+    # ---------- 其它自定义属性 ----------
     def set_attr(self, key, value):
         self.attrs[key] = value
         return self
@@ -75,11 +133,16 @@ class HexCell:
             'cy': round(self.cy, 3),
             'neighbors': list(self.neighbors),
             'neighbor_map': dict(self.neighbor_map),
+            'terrain': self.terrain,
+            'move_cost': self.move_cost,
+            'terrain_modifier': self.terrain_modifier,
             'attrs': dict(self.attrs),
         }
 
     def __repr__(self):
-        return 'HexCell(#%d, q=%d, r=%d, 邻居=%d)' % (self.id, self.q, self.r, len(self.neighbors))
+        return 'HexCell(#%d, q=%d, r=%d, 地形=%s, 邻居=%d)' % (
+            self.id, self.q, self.r, self.terrain or '空地', len(self.neighbors)
+        )
 
 
 class HexMap:
@@ -100,8 +163,11 @@ class HexMap:
             cell = HexCell(cell_id, q, r, cx, cy, self.cell_size)
             if previous is not None:
                 old = previous.cell_at(q, r)
-                if old is not None and old.attrs:
+                if old is not None:
                     cell.attrs = dict(old.attrs)
+                    cell.terrain = old.terrain
+                    cell.move_cost = old.move_cost
+                    cell.terrain_modifier = old.terrain_modifier
             self.cells[cell_id] = cell
             self.index[(q, r)] = cell_id
         self._link_neighbors()
@@ -130,12 +196,29 @@ class HexMap:
             return None
         return self.cells[cell_id]
 
+    def cell_at_point(self, x, y):
+        """点 (x, y) 落在哪个格子里（坐标按画布尺寸，不含缩放）；没命中返回 None。"""
+        apothem = math.sqrt(3) / 2.0 * self.cell_size
+        cos30 = math.sqrt(3) / 2.0
+        sin30 = 0.5
+        for cell in self.cells.values():
+            dx = x - cell.cx
+            if abs(dx) > self.cell_size:
+                continue
+            dy = y - cell.cy
+            if abs(dy) > apothem:
+                continue
+            if abs(cos30 * dx + sin30 * dy) > apothem:
+                continue
+            if abs(-sin30 * dx + cos30 * dy) > apothem:
+                continue
+            return cell
+        return None
+
     def neighbor_ids(self, cell_id):
-        """相邻格子的编号列表。"""
         return list(self.cells[int(cell_id)].neighbors)
 
     def neighbors(self, cell_id):
-        """相邻格子对象列表。"""
         return [self.cells[nid] for nid in self.cells[int(cell_id)].neighbors]
 
     def neighbor(self, cell_id, direction):
@@ -155,7 +238,6 @@ class HexMap:
         return None
 
     def are_adjacent(self, a, b):
-        """两个格子是否相邻。"""
         return int(b) in self.cells[int(a)].neighbors
 
     def iter_cells(self):
@@ -163,9 +245,36 @@ class HexMap:
         for cell_id in sorted(self.cells):
             yield self.cells[cell_id]
 
+    # ---------- 地形 ----------
+    def apply_terrains(self, mapping):
+        """批量设置地形：{(q, r): 地形名}；返回生效的格子数。"""
+        count = 0
+        for key, name in (mapping or {}).items():
+            if isinstance(key, str):
+                parts = key.split(',')
+                q, r = int(parts[0]), int(parts[1])
+            else:
+                q, r = int(key[0]), int(key[1])
+            cell = self.cell_at(q, r)
+            if cell is not None:
+                cell.set_terrain(name)
+                count += 1
+        return count
+
+    def terrain_map(self):
+        """导出 {(q, r): 地形名}（只含已设置地形的格子）。"""
+        return {(cell.q, cell.r): cell.terrain for cell in self.cells.values() if cell.terrain}
+
+    def terrain_counts(self):
+        """统计各地形的格子数。"""
+        counts = {}
+        for cell in self.cells.values():
+            if cell.terrain:
+                counts[cell.terrain] = counts.get(cell.terrain, 0) + 1
+        return counts
+
     # ---------- 统计 ----------
     def edge_count(self):
-        """相邻边的数量（无向图，每条边只算一次）。"""
         return sum(len(cell.neighbors) for cell in self.cells.values()) // 2
 
     def degree_stats(self):
@@ -175,7 +284,6 @@ class HexMap:
         return {'min': min(degrees), 'max': max(degrees), 'avg': sum(degrees) / float(len(degrees))}
 
     def is_connected(self):
-        """整张图是否连通。"""
         if not self.cells:
             return True
         start = next(iter(self.cells))
@@ -190,7 +298,6 @@ class HexMap:
         return len(seen) == len(self.cells)
 
     def summary(self):
-        """地图与图结构的简要统计。"""
         stats = self.degree_stats()
         return {
             'cols': self.cols,
@@ -200,10 +307,10 @@ class HexMap:
             'degree_min': stats['min'],
             'degree_max': stats['max'],
             'connected': self.is_connected(),
+            'terrains': self.terrain_counts(),
         }
 
     def to_dict(self):
-        """导出为可序列化的字典（含每个格子的属性）。"""
         return {
             'cols': self.cols,
             'rows': self.rows,
