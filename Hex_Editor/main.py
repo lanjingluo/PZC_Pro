@@ -620,6 +620,7 @@ class HexEditorApp:
                 if edge_path is None:
                     edge_path = GraphicsPath()
                     edge_paths[name] = edge_path
+                edge_path.StartFigure()      # 关键：每段独立，否则 GDI+ 会把相邻线段的端点连起来
                 edge_path.AddLine(PointF(edge.p1[0] * zoom, edge.p1[1] * zoom),
                                   PointF(edge.p2[0] * zoom, edge.p2[1] * zoom))
             self.clear_grid_paths()
