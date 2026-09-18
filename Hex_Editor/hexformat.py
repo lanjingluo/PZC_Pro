@@ -5,7 +5,7 @@ import struct
 MAGIC = b'HEX1'
 MAX_DISPLAY_BYTES = 512 * 1024
 MAP_TYPE = 'HEXMAP'
-MAP_PAYLOAD_VERSION = 4
+MAP_PAYLOAD_VERSION = 5
 # A 系列纸张（毫米，宽×高，纵向）
 PAPER_SIZES_MM = {
     'A1': (594, 841),
@@ -90,10 +90,70 @@ def format_hex_view(data: bytes, max_bytes: int = MAX_DISPLAY_BYTES) -> str:
         ascii_part = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
         lines.append(f'{i:08X}  {hex_part:<48} {ascii_part}')
     return '\n'.join(lines)
-def make_hex_map_payload(paper: str, cols: int, width=None, height=None, margins=None, terrains=None) -> bytes:
+def _encode_terrain_items(source):
+    """把 {键: 名字/三元组} 编码成 JSON 对象；三元组表示单独指定的消耗与修正。"""
+    out = {}
+    for key, value in (source or {}).items():
+        if isinstance(key, str):
+            item_key = key
+        else:
+            item_key = '%d,%d' % (int(key[0]), int(key[1]))
+        if isinstance(value, (list, tuple)):
+            name = value[0] if len(value) > 0 else None
+            if not name:
+                continue
+            cost = value[1] if len(value) > 1 else None
+            modifier = value[2] if len(value) > 2 else None
+            out[item_key] = [str(name), cost, modifier]
+        elif value:
+            out[item_key] = str(value)
+    return out
+
+
+def _decode_terrain_items(source, key_parser):
+    """把 JSON 对象解码成 {键: 名字 或 (名字, 消耗, 修正)}。"""
+    out = {}
+    for key, value in (source or {}).items():
+        parsed = key_parser(key)
+        if parsed is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            name = str(value[0]) if len(value) > 0 and value[0] else ''
+            if not name:
+                continue
+            cost = value[1] if len(value) > 1 else None
+            modifier = value[2] if len(value) > 2 else None
+            out[parsed] = (name,
+                           None if cost is None else int(cost),
+                           None if modifier is None else int(modifier))
+        elif value:
+            out[parsed] = str(value)
+    return out
+
+
+def _parse_cell_key(key):
+    """格子键 "列,行" -> (列, 行)。"""
+    try:
+        parts = str(key).split(',')
+        return (int(parts[0]), int(parts[1]))
+    except Exception:
+        return None
+
+
+def _parse_edge_key(key):
+    """格边键必须含分隔符 |，原样返回字符串。"""
+    text = str(key)
+    if '|' not in text:
+        return None
+    return text
+
+
+def make_hex_map_payload(paper: str, cols: int, width=None, height=None, margins=None,
+                         terrains=None, edges=None) -> bytes:
     """把画布文档序列化成 .hex 负载（JSON，UTF-8）。
-    v4：cells 地形表支持三种值——"树林"（用默认消耗/修正）、
-        ["山地", 5, -4]（单独指定消耗与修正）、空值忽略；v1/v2/v3 文件仍可读取。
+    v5：新增 edges 格边地形表（键形如 "列,行|列,行" 或边界的 "列,行|方向"），
+        cells/edges 的值都支持 "河流"（默认消耗/修正）或 ["河流", 3, -1]（单独指定）；
+        v1~v4 文件仍可读取。
     """
     paper = paper.upper()
     doc = {'v': MAP_PAYLOAD_VERSION, 'paper': paper, 'cols': int(cols)}
@@ -107,33 +167,21 @@ def make_hex_map_payload(paper: str, cols: int, width=None, height=None, margins
                 clean[key] = int(margins[key])
         if clean:
             doc['margins'] = clean
-    if terrains:
-        cells = {}
-        for key, value in terrains.items():
-            if isinstance(key, str):
-                cell_key = key
-            else:
-                cell_key = '%d,%d' % (int(key[0]), int(key[1]))
-            if isinstance(value, (list, tuple)):
-                name = value[0] if len(value) > 0 else None
-                cost = value[1] if len(value) > 1 else None
-                modifier = value[2] if len(value) > 2 else None
-                if not name:
-                    continue
-                cells[cell_key] = [str(name), cost, modifier]
-            elif value:
-                cells[cell_key] = str(value)
-        if cells:
-            doc['cells'] = cells
+    cells = _encode_terrain_items(terrains)
+    if cells:
+        doc['cells'] = cells
+    edge_items = _encode_terrain_items(edges)
+    if edge_items:
+        doc['edges'] = edge_items
     return json.dumps(doc, ensure_ascii=False).encode('utf-8')
 def parse_hex_map_payload(payload: bytes):
     """解析画布文档负载；不是合法画布文档时返回 None。
-    返回 dict：paper、cols、width、height、margins、terrains。
+    返回 dict：paper、cols、width、height、margins、terrains、edges。
     """
     try:
         doc = json.loads(payload.decode('utf-8'))
         version = doc.get('v')
-        if version not in (1, 2, 3, 4):
+        if version not in (1, 2, 3, 4, 5):
             return None
         paper = str(doc.get('paper', '')).upper()
         cols = int(doc.get('cols', 0))
@@ -144,33 +192,18 @@ def parse_hex_map_payload(payload: bytes):
         for key in ('l', 't', 'r', 'b'):
             if key in raw_margins:
                 margins[key] = int(raw_margins[key])
-        terrains = {}
-        raw_cells = doc.get('cells') or {}
-        for key, value in raw_cells.items():
-            try:
-                parts = str(key).split(',')
-                q, r = int(parts[0]), int(parts[1])
-            except Exception:
-                continue
-            if isinstance(value, (list, tuple)):
-                name = str(value[0]) if len(value) > 0 and value[0] else ''
-                if not name:
-                    continue
-                cost = value[1] if len(value) > 1 else None
-                modifier = value[2] if len(value) > 2 else None
-                terrains[(q, r)] = (name,
-                                    None if cost is None else int(cost),
-                                    None if modifier is None else int(modifier))
-            elif value:
-                terrains[(q, r)] = str(value)
+        terrains = _decode_terrain_items(doc.get('cells'), _parse_cell_key)
+        edges = _decode_terrain_items(doc.get('edges'), _parse_edge_key)
         if paper == 'CUSTOM':
             width = int(doc.get('width', 0))
             height = int(doc.get('height', 0))
             if width >= 1 and height >= 1:
-                return {'paper': paper, 'cols': cols, 'width': width, 'height': height, 'margins': margins, 'terrains': terrains}
+                return {'paper': paper, 'cols': cols, 'width': width, 'height': height,
+                        'margins': margins, 'terrains': terrains, 'edges': edges}
             return None
         if paper not in PAPER_SIZES_MM:
             return None
-        return {'paper': paper, 'cols': cols, 'width': None, 'height': None, 'margins': margins, 'terrains': terrains}
+        return {'paper': paper, 'cols': cols, 'width': None, 'height': None,
+                'margins': margins, 'terrains': terrains, 'edges': edges}
     except Exception:
         return None

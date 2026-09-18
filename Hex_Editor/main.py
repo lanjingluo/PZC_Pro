@@ -59,7 +59,7 @@ from System.Windows.Forms import (
 )
 from System.Threading import ApartmentState, Thread, ThreadStart
 from System.Drawing import Color, Font, FontStyle, Pen, Point, PointF, Rectangle, Size, SolidBrush
-from System.Drawing.Drawing2D import GraphicsPath
+from System.Drawing.Drawing2D import GraphicsPath, LineCap, LineJoin
 import System
 from hexformat import (
     MAP_TYPE,
@@ -71,7 +71,8 @@ from hexformat import (
     parse_hex_map_payload,
     read_hex_container,
 )
-from hexmap import TERRAIN_NAMES, TERRAINS, HexMap, normalize_margins, terrain_color
+from hexmap import (EDGE_TERRAIN_NAMES, EDGE_TERRAINS, TERRAIN_NAMES, TERRAINS,
+                    HexMap, edge_terrain_color, normalize_margins, terrain_color)
 try:
     from imagedetect import detect_hex_grid
 except Exception:
@@ -102,6 +103,8 @@ MAX_ZOOM = 8.0
 ZOOM_STEP = 1.25
 GRID_PEN_WIDTH = 2.0
 CLEAR_TERRAIN = '__clear__'
+EDGE_CLEAR = '__edge_clear__'
+EDGE_PEN_WIDTH = 6.0        # 格边地形（河流）画多粗（屏幕像素）
 class HexEditorApp:
     """主窗口应用。"""
     def __init__(self):
@@ -117,11 +120,15 @@ class HexEditorApp:
         self.map_height = None
         self.map_margins = {}
         self._syncing = False
-        self._grid_paths = {}          # 地形 -> 网格路径（按显示尺寸生成）
+        self._grid_paths = {}          # 格子地形 -> 路径
         self._selected_path = None     # 选中格子的高亮路径
+        self._edge_paths = {}          # 格边地形 -> 路径
+        self._selected_edge_path = None
         self.hex_map = None
         self.selected_cell_id = None
+        self.selected_edge_key = None
         self.active_terrain = None
+        self.active_edge_terrain = None
         self.modified = False
         self.zoom = 1.0
         self._render_timer = Timer()
@@ -310,6 +317,37 @@ class HexEditorApp:
         self.clear_button.FlatStyle = FlatStyle.Flat
         self.clear_button.Click += self.on_terrain_clear_button
         self.side_panel.Controls.Add(self.clear_button)
+        next_y += 40
+        edge_title = Label()
+        edge_title.Text = '格边地形'
+        edge_title.Font = Font('Microsoft YaHei UI', 10, FontStyle.Bold)
+        edge_title.Location = Point(10, next_y)
+        edge_title.AutoSize = True
+        self.side_panel.Controls.Add(edge_title)
+        next_y += 26
+        self.edge_terrain_buttons = {}
+        for edge_name in EDGE_TERRAIN_NAMES:
+            edge_info = EDGE_TERRAINS[edge_name]
+            edge_button = Button()
+            edge_button.Text = '%s（跨边 +%d）' % (edge_name, edge_info['move_cost'])
+            edge_button.Location = Point(10, next_y)
+            edge_button.Size = Size(150, 30)
+            edge_button.FlatStyle = FlatStyle.Flat
+            edge_red, edge_green, edge_blue = edge_info['color']
+            edge_button.BackColor = Color.FromArgb(edge_red, edge_green, edge_blue)
+            if edge_red + edge_green + edge_blue < 400:
+                edge_button.ForeColor = Color.White
+            edge_button.Click += self.on_edge_terrain_button
+            self.side_panel.Controls.Add(edge_button)
+            self.edge_terrain_buttons[edge_name] = edge_button
+            next_y += 34
+        self.edge_clear_button = Button()
+        self.edge_clear_button.Text = '清除格边'
+        self.edge_clear_button.Location = Point(10, next_y)
+        self.edge_clear_button.Size = Size(150, 30)
+        self.edge_clear_button.FlatStyle = FlatStyle.Flat
+        self.edge_clear_button.Click += self.on_edge_clear_button
+        self.side_panel.Controls.Add(self.edge_clear_button)
         next_y += 44
         sel_title = Label()
         sel_title.Text = '选中格子'
@@ -342,6 +380,11 @@ class HexEditorApp:
         self.modifier_label.Location = Point(10, next_y)
         self.modifier_label.AutoSize = True
         self.side_panel.Controls.Add(self.modifier_label)
+        next_y += 22
+        self.edge_label = Label()
+        self.edge_label.Location = Point(10, next_y)
+        self.edge_label.AutoSize = True
+        self.side_panel.Controls.Add(self.edge_label)
         next_y += 30
         self.terrain_stats_label = Label()
         self.terrain_stats_label.Location = Point(10, next_y)
@@ -401,6 +444,7 @@ class HexEditorApp:
         self._syncing = False
         self.clear_grid_paths()
         self.selected_cell_id = None
+        self.selected_edge_key = None
         self.canvas_box.Invalidate()
         self.rebuild_hex_map()
         self.update_cell_info()
@@ -432,8 +476,9 @@ class HexEditorApp:
     def current_payload_and_type(self):
         if self.mode == 'map':
             terrains = self.hex_map.terrain_cells() if self.hex_map is not None else None
+            edges = self.hex_map.edge_terrain_cells() if self.hex_map is not None else None
             return make_hex_map_payload(
-                self.map_paper, self.map_cols, self.map_width, self.map_height, self.map_margins, terrains
+                self.map_paper, self.map_cols, self.map_width, self.map_height, self.map_margins, terrains, edges
             ), MAP_TYPE
         return self.file_bytes, self.original_type
     # ---------- 六角格画布事件 ----------
@@ -510,6 +555,31 @@ class HexEditorApp:
         if self._selected_path is not None:
             self._selected_path.Dispose()
             self._selected_path = None
+        self.clear_edge_paths()
+
+    def clear_edge_paths(self):
+        for path in self._edge_paths.values():
+            path.Dispose()
+        self._edge_paths = {}
+        if self._selected_edge_path is not None:
+            self._selected_edge_path.Dispose()
+            self._selected_edge_path = None
+
+    def _update_selected_edge_path(self):
+        old = self._selected_edge_path
+        self._selected_edge_path = None
+        if old is not None:
+            old.Dispose()
+        if self.hex_map is None or not self.selected_edge_key:
+            return
+        edge = self.hex_map.edge_by_key(self.selected_edge_key)
+        if edge is None:
+            return
+        zoom = self.zoom
+        path = GraphicsPath()
+        path.AddLine(PointF(edge.p1[0] * zoom, edge.p1[1] * zoom),
+                     PointF(edge.p2[0] * zoom, edge.p2[1] * zoom))
+        self._selected_edge_path = path
 
     def _update_selected_path(self):
         old = self._selected_path
@@ -541,9 +611,22 @@ class HexEditorApp:
                     path = GraphicsPath()
                     paths[key] = path
                 path.AddPolygon([PointF(cx * zoom, cy * zoom) for cx, cy in cell.corners()])
+            edge_paths = {}
+            for edge in self.hex_map.edges.values():
+                if not edge.terrain:
+                    continue
+                name = edge.terrain
+                edge_path = edge_paths.get(name)
+                if edge_path is None:
+                    edge_path = GraphicsPath()
+                    edge_paths[name] = edge_path
+                edge_path.AddLine(PointF(edge.p1[0] * zoom, edge.p1[1] * zoom),
+                                  PointF(edge.p2[0] * zoom, edge.p2[1] * zoom))
             self.clear_grid_paths()
             self._grid_paths = paths
+            self._edge_paths = edge_paths
             self._update_selected_path()
+            self._update_selected_edge_path()
         finally:
             self.form.UseWaitCursor = False
 
@@ -573,6 +656,22 @@ class HexEditorApp:
             sel_pen = Pen(Color.FromArgb(255, 210, 40, 40), GRID_PEN_WIDTH + 1.0)
             g.DrawPath(sel_pen, self._selected_path)
             sel_pen.Dispose()
+        for name, edge_path in self._edge_paths.items():
+            rgb = edge_terrain_color(name)
+            if rgb is None:
+                continue
+            edge_pen = Pen(Color.FromArgb(rgb[0], rgb[1], rgb[2]), EDGE_PEN_WIDTH * self.zoom)
+            edge_pen.StartCap = LineCap.Round
+            edge_pen.EndCap = LineCap.Round
+            edge_pen.LineJoin = LineJoin.Round
+            g.DrawPath(edge_pen, edge_path)
+            edge_pen.Dispose()
+        if self._selected_edge_path is not None:
+            sel_edge_pen = Pen(Color.FromArgb(255, 240, 200, 40), max(2.0, EDGE_PEN_WIDTH * self.zoom * 0.5))
+            sel_edge_pen.StartCap = LineCap.Round
+            sel_edge_pen.EndCap = LineCap.Round
+            g.DrawPath(sel_edge_pen, self._selected_edge_path)
+            sel_edge_pen.Dispose()
 
     # ---------- 地形属性 ----------
     def on_terrain_button(self, sender, e):
@@ -585,12 +684,46 @@ class HexEditorApp:
     def on_terrain_clear_button(self, sender=None, e=None):
         self._set_active_terrain(CLEAR_TERRAIN)
 
+    def on_edge_terrain_button(self, sender, e):
+        text = sender.Text
+        for name in EDGE_TERRAIN_NAMES:
+            if text.startswith(name):
+                self._set_active_edge_terrain(name)
+                return
+
+    def on_edge_clear_button(self, sender=None, e=None):
+        self._set_active_edge_terrain(EDGE_CLEAR)
+
+    def _set_active_edge_terrain(self, name):
+        self.active_edge_terrain = name or None
+        for edge_name, edge_button in self.edge_terrain_buttons.items():
+            edge_button.FlatAppearance.BorderSize = 3 if edge_name == self.active_edge_terrain else 1
+        self.edge_clear_button.FlatAppearance.BorderSize = 3 if self.active_edge_terrain == EDGE_CLEAR else 1
+        if self.active_edge_terrain is not None:
+            self.active_terrain = None
+            for terrain_name, button in self.terrain_buttons.items():
+                button.FlatAppearance.BorderSize = 1
+            self.clear_button.FlatAppearance.BorderSize = 1
+        if self.active_edge_terrain is None:
+            self.set_status('已取消格边选择：点击格子只查看属性')
+        elif self.active_edge_terrain == EDGE_CLEAR:
+            self.set_status('清除格边：点击靠近某条格边的位置即可清除')
+        else:
+            info = EDGE_TERRAINS[self.active_edge_terrain]
+            self.set_status('格边地形：%s（跨边额外消耗 %d）——点击靠近某条格边的位置即可设置'
+                            % (self.active_edge_terrain, info['move_cost']))
+
     def _set_active_terrain(self, name):
         self.active_terrain = name or None
         for terrain_name, button in self.terrain_buttons.items():
             active = (terrain_name == self.active_terrain)
             button.FlatAppearance.BorderSize = 3 if active else 1
         self.clear_button.FlatAppearance.BorderSize = 3 if self.active_terrain == CLEAR_TERRAIN else 1
+        if self.active_terrain is not None:
+            self.active_edge_terrain = None
+            for edge_name, edge_button in self.edge_terrain_buttons.items():
+                edge_button.FlatAppearance.BorderSize = 1
+            self.edge_clear_button.FlatAppearance.BorderSize = 1
         if self.active_terrain is None:
             self.set_status('已取消地形选择：点击格子只查看属性')
         elif self.active_terrain == CLEAR_TERRAIN:
@@ -605,7 +738,32 @@ class HexEditorApp:
             return
         if e.Button != MouseButtons.Left:
             return
-        cell = self.hex_map.cell_at_point(e.X / self.zoom, e.Y / self.zoom)
+        doc_x = e.X / self.zoom
+        doc_y = e.Y / self.zoom
+        if self.active_edge_terrain is not None:
+            tolerance = max(4.0, self.hex_map.cell_size * 0.35)
+            edge = self.hex_map.edge_at_point(doc_x, doc_y, tolerance)
+            if edge is not None:
+                changed = False
+                if self.active_edge_terrain == EDGE_CLEAR:
+                    changed = edge.terrain is not None
+                    edge.clear_terrain()
+                else:
+                    changed = edge.terrain != self.active_edge_terrain
+                    edge.set_terrain(self.active_edge_terrain)
+                self.selected_edge_key = self.hex_map.edge_semantic_key(edge)
+                self.selected_cell_id = edge.cells[0]
+                self.update_cell_info()
+                if changed:
+                    self.modified = True
+                    self.update_title()
+                    self.schedule_render()
+                else:
+                    self._update_selected_edge_path()
+                self.canvas_box.Invalidate()
+                self.set_status('格边 %s：%s' % (self.selected_edge_key, edge.terrain or '无'))
+                return
+        cell = self.hex_map.cell_at_point(doc_x, doc_y)
         if cell is None:
             return
         changed = False
@@ -648,9 +806,21 @@ class HexEditorApp:
             self.terrain_label.Text = '地形：%s' % terrain_name
             self.cost_label.Text = '移动力消耗：%s' % ('-' if cell.move_cost is None else cell.move_cost)
             self.modifier_label.Text = '地形修正：%s' % ('-' if cell.terrain_modifier is None else cell.terrain_modifier)
+        edge = None
+        if self.hex_map is not None and self.selected_edge_key:
+            edge = self.hex_map.edge_by_key(self.selected_edge_key)
+        if edge is None:
+            self.edge_label.Text = '格边：-'
+        elif edge.terrain:
+            self.edge_label.Text = '格边：%s（跨边 +%s）' % (
+                edge.terrain, '-' if edge.move_cost is None else edge.move_cost)
+        else:
+            self.edge_label.Text = '格边：未设置'
         counts = self.hex_map.terrain_counts() if self.hex_map is not None else {}
         parts = ['%s %d' % (name, counts.get(name, 0)) for name in TERRAIN_NAMES]
-        self.terrain_stats_label.Text = '统计：' + ' / '.join(parts)
+        edge_counts = self.hex_map.edge_terrain_counts() if self.hex_map is not None else {}
+        edge_parts = ['%s %d' % (name, edge_counts.get(name, 0)) for name in EDGE_TERRAIN_NAMES]
+        self.terrain_stats_label.Text = '格子：' + ' / '.join(parts) + '\n格边：' + ' / '.join(edge_parts)
     def set_zoom(self, zoom):
         zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(zoom)))
         if abs(zoom - self.zoom) < 0.001:
@@ -686,7 +856,7 @@ class HexEditorApp:
     def show_about(self, sender=None, e=None):
         MessageBox.Show(
             self.form,
-            'Hex Editor\n版本 1.2（Python）\n'
+            'Hex Editor\n版本 1.3（Python）\n'
             '创建/保存 .hex 文件；六角格画布支持 A1-A4 纸张与正六边形平铺',
             '关于',
         )
@@ -845,10 +1015,23 @@ class HexEditorApp:
                             )
                         self.update_cell_info()
                         self.schedule_render()
+                    edge_count = 0
+                    if map_doc.get('edges') and self.hex_map is not None:
+                        edge_count = self.hex_map.apply_edges(map_doc['edges'])
+                        unknown_edges = self.hex_map.unknown_edge_terrains()
+                        if unknown_edges:
+                            MessageBox.Show(
+                                self.form,
+                                '文件里有 %d 个未知格边地形名：%s\n这些格边会以灰色显示，并原样保留。'
+                                % (len(unknown_edges), '、'.join(unknown_edges)),
+                                'Hex Editor - 未知格边地形',
+                            )
+                        self.update_cell_info()
+                        self.schedule_render()
                     w, h = map_canvas_size(map_doc['paper'], map_doc['width'], map_doc['height'])
                     self.set_status(
                         f'已打开六角格画布：{map_doc["paper"]}，{map_doc["cols"]} 列（{w}×{h} px），'
-                        f'已恢复 {terrain_count} 个格子的地形'
+                        f'已恢复 {terrain_count} 个格子地形、{edge_count} 条格边地形'
                     )
                     return
                 self.file_bytes = info['payload']
