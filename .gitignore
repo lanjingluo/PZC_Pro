@@ -13,3 +13,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# 应用输出：保存的画布文件
+saves/
