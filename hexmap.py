@@ -6,7 +6,7 @@
 - HexMap：整张地图的格子集合。格子按行优先从 1 开始连续编号；
   相邻的六角格互相连接，形成一张无向图（每个格子最多 6 个邻居，边缘更少）。
 
-地形定义见 TERRAINS：树林（绿）、山地（棕）、城市（黑）。
+地形定义见 TERRAINS：树林（绿）、山地（棕）、城市（黑）、河流（蓝）。
 移动力消耗 / 地形修正只是默认值，可按需修改这张表。
 """
 import math
@@ -23,8 +23,9 @@ TERRAINS = {
     '树林': {'name': '树林', 'color': (60, 150, 70), 'move_cost': 2, 'modifier': -1},
     '山地': {'name': '山地', 'color': (150, 105, 60), 'move_cost': 3, 'modifier': -2},
     '城市': {'name': '城市', 'color': (0, 0, 0), 'move_cost': 1, 'modifier': -3},
+    '河流': {'name': '河流', 'color': (70, 130, 200), 'move_cost': 3, 'modifier': -1},
 }
-TERRAIN_NAMES = ('树林', '山地', '城市')
+TERRAIN_NAMES = ('树林', '山地', '城市', '河流')
 
 
 def neighbor_offsets(q):
