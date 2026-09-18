@@ -26,6 +26,8 @@ TERRAINS = {
     '河流': {'name': '河流', 'color': (70, 130, 200), 'move_cost': 3, 'modifier': -1},
 }
 TERRAIN_NAMES = ('树林', '山地', '城市', '河流')
+# 文件里出现、但不在 TERRAINS 表中的名字用这个颜色显示，避免静默丢失
+UNKNOWN_TERRAIN_COLOR = (200, 200, 200)
 
 
 def neighbor_offsets(q):
@@ -40,10 +42,12 @@ def normalize_margins(margins):
 
 
 def terrain_color(name):
-    """地形颜色（RGB），未设置地形返回 None。"""
+    """地形颜色（RGB）：已知地形用表中颜色，未知地形用灰色，未设置返回 None。"""
+    if not name:
+        return None
     info = TERRAINS.get(name)
     if info is None:
-        return None
+        return UNKNOWN_TERRAIN_COLOR
     return info['color']
 
 
@@ -78,6 +82,11 @@ class HexCell:
         """是否是未设置地形的空地。"""
         return self.terrain is None
 
+    @property
+    def is_known_terrain(self):
+        """地形名字是否在 TERRAINS 表中（空地为 False）。"""
+        return bool(self.terrain) and self.terrain in TERRAINS
+
     def corners(self):
         """该格 6 个顶点的坐标列表。"""
         return hex_corners(self.cx, self.cy, self.cell_size)
@@ -85,18 +94,22 @@ class HexCell:
     def set_terrain(self, name, move_cost=None, modifier=None):
         """设置地形，并套用该地形的默认移动力消耗与地形修正。
 
-        name 为 None 或不在 TERRAINS 中时清空地形；
+        name 为 None 或空字符串时清空地形（空地）。
+        不在 TERRAINS 中的名字会被原样保留（视为未知地形，用灰色显示），
+        以免读入旧文件时静默丢数据；此时消耗/修正取传入值或 None。
         传入 move_cost / modifier 可覆盖默认值（用于单个格子的特殊调整）。
         """
-        info = TERRAINS.get(name)
-        if info is None:
+        if name is None or name == '':
             self.terrain = None
             self.move_cost = None
             self.terrain_modifier = None
-        else:
-            self.terrain = info['name']
-            self.move_cost = info['move_cost'] if move_cost is None else int(move_cost)
-            self.terrain_modifier = info['modifier'] if modifier is None else int(modifier)
+            return self
+        info = TERRAINS.get(name)
+        self.terrain = info['name'] if info is not None else str(name)
+        default_cost = info['move_cost'] if info is not None else None
+        default_modifier = info['modifier'] if info is not None else None
+        self.move_cost = default_cost if move_cost is None else int(move_cost)
+        self.terrain_modifier = default_modifier if modifier is None else int(modifier)
         return self
 
     def clear_terrain(self):
@@ -248,23 +261,59 @@ class HexMap:
 
     # ---------- 地形 ----------
     def apply_terrains(self, mapping):
-        """批量设置地形：{(q, r): 地形名}；返回生效的格子数。"""
+        """批量设置地形，返回生效的格子数。
+
+        键可以是 "列,行" 字符串或 (列, 行) 元组；
+        值可以是地形名字符串，也可以是 (名字, 消耗, 修正) 序列。
+        """
         count = 0
-        for key, name in (mapping or {}).items():
+        for key, value in (mapping or {}).items():
             if isinstance(key, str):
                 parts = key.split(',')
                 q, r = int(parts[0]), int(parts[1])
             else:
                 q, r = int(key[0]), int(key[1])
             cell = self.cell_at(q, r)
-            if cell is not None:
-                cell.set_terrain(name)
-                count += 1
+            if cell is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                name = value[0] if len(value) > 0 else None
+                cost = value[1] if len(value) > 1 else None
+                modifier = value[2] if len(value) > 2 else None
+                cell.set_terrain(name, cost, modifier)
+            else:
+                cell.set_terrain(value)
+            count += 1
         return count
 
     def terrain_map(self):
         """导出 {(q, r): 地形名}（只含已设置地形的格子）。"""
         return {(cell.q, cell.r): cell.terrain for cell in self.cells.values() if cell.terrain}
+
+    def terrain_cells(self):
+        """导出可保存的地形表。
+
+        与地形默认值相同的格子只存名字；单独改过消耗/修正的格子存 [名字, 消耗, 修正]。
+        """
+        out = {}
+        for cell in self.cells.values():
+            if not cell.terrain:
+                continue
+            info = TERRAINS.get(cell.terrain)
+            if (info is not None and cell.move_cost == info['move_cost']
+                    and cell.terrain_modifier == info['modifier']):
+                out[(cell.q, cell.r)] = cell.terrain
+            else:
+                out[(cell.q, cell.r)] = [cell.terrain, cell.move_cost, cell.terrain_modifier]
+        return out
+
+    def unknown_terrains(self):
+        """文件里出现过、但不在 TERRAINS 表中的地形名（去重排序）。"""
+        names = set()
+        for cell in self.cells.values():
+            if cell.terrain and cell.terrain not in TERRAINS:
+                names.add(cell.terrain)
+        return sorted(names)
 
     def terrain_counts(self):
         """统计各地形的格子数。"""

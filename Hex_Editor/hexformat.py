@@ -5,7 +5,7 @@ import struct
 MAGIC = b'HEX1'
 MAX_DISPLAY_BYTES = 512 * 1024
 MAP_TYPE = 'HEXMAP'
-MAP_PAYLOAD_VERSION = 3
+MAP_PAYLOAD_VERSION = 4
 # A 系列纸张（毫米，宽×高，纵向）
 PAPER_SIZES_MM = {
     'A1': (594, 841),
@@ -92,8 +92,8 @@ def format_hex_view(data: bytes, max_bytes: int = MAX_DISPLAY_BYTES) -> str:
     return '\n'.join(lines)
 def make_hex_map_payload(paper: str, cols: int, width=None, height=None, margins=None, terrains=None) -> bytes:
     """把画布文档序列化成 .hex 负载（JSON，UTF-8）。
-    v3：在 v2（CUSTOM 自定义尺寸、margins 边距）基础上增加 cells 地形表，
-        键为 "列,行"，值为地形名字；v1/v2 文件仍可读取。
+    v4：cells 地形表支持三种值——"树林"（用默认消耗/修正）、
+        ["山地", 5, -4]（单独指定消耗与修正）、空值忽略；v1/v2/v3 文件仍可读取。
     """
     paper = paper.upper()
     doc = {'v': MAP_PAYLOAD_VERSION, 'paper': paper, 'cols': int(cols)}
@@ -109,13 +109,20 @@ def make_hex_map_payload(paper: str, cols: int, width=None, height=None, margins
             doc['margins'] = clean
     if terrains:
         cells = {}
-        for key, name in terrains.items():
-            if not name:
-                continue
+        for key, value in terrains.items():
             if isinstance(key, str):
-                cells[key] = str(name)
+                cell_key = key
             else:
-                cells['%d,%d' % (int(key[0]), int(key[1]))] = str(name)
+                cell_key = '%d,%d' % (int(key[0]), int(key[1]))
+            if isinstance(value, (list, tuple)):
+                name = value[0] if len(value) > 0 else None
+                cost = value[1] if len(value) > 1 else None
+                modifier = value[2] if len(value) > 2 else None
+                if not name:
+                    continue
+                cells[cell_key] = [str(name), cost, modifier]
+            elif value:
+                cells[cell_key] = str(value)
         if cells:
             doc['cells'] = cells
     return json.dumps(doc, ensure_ascii=False).encode('utf-8')
@@ -126,7 +133,7 @@ def parse_hex_map_payload(payload: bytes):
     try:
         doc = json.loads(payload.decode('utf-8'))
         version = doc.get('v')
-        if version not in (1, 2, 3):
+        if version not in (1, 2, 3, 4):
             return None
         paper = str(doc.get('paper', '')).upper()
         cols = int(doc.get('cols', 0))
@@ -139,14 +146,23 @@ def parse_hex_map_payload(payload: bytes):
                 margins[key] = int(raw_margins[key])
         terrains = {}
         raw_cells = doc.get('cells') or {}
-        for key, name in raw_cells.items():
+        for key, value in raw_cells.items():
             try:
                 parts = str(key).split(',')
                 q, r = int(parts[0]), int(parts[1])
             except Exception:
                 continue
-            if name:
-                terrains[(q, r)] = str(name)
+            if isinstance(value, (list, tuple)):
+                name = str(value[0]) if len(value) > 0 and value[0] else ''
+                if not name:
+                    continue
+                cost = value[1] if len(value) > 1 else None
+                modifier = value[2] if len(value) > 2 else None
+                terrains[(q, r)] = (name,
+                                    None if cost is None else int(cost),
+                                    None if modifier is None else int(modifier))
+            elif value:
+                terrains[(q, r)] = str(value)
         if paper == 'CUSTOM':
             width = int(doc.get('width', 0))
             height = int(doc.get('height', 0))

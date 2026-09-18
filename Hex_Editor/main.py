@@ -39,6 +39,8 @@ from System.Windows.Forms import (
     Label,
     MenuStrip,
     MessageBox,
+    MessageBoxButtons,
+    MessageBoxIcon,
     MouseButtons,
     OpenFileDialog,
     Padding,
@@ -56,22 +58,20 @@ from System.Windows.Forms import (
     TrackBar,
 )
 from System.Threading import ApartmentState, Thread, ThreadStart
-from System.Drawing import Bitmap, Color, Font, FontStyle, Graphics, Pen, Point, PointF, Rectangle, Size, SolidBrush
-from System.Drawing.Drawing2D import GraphicsPath, InterpolationMode
+from System.Drawing import Color, Font, FontStyle, Pen, Point, PointF, Rectangle, Size, SolidBrush
+from System.Drawing.Drawing2D import GraphicsPath
 import System
 from hexformat import (
     MAP_TYPE,
     format_hex_view,
-    hex_corners,
     hex_layout,
     make_hex_container,
     make_hex_map_payload,
     map_canvas_size,
-    paper_size_pixels,
     parse_hex_map_payload,
     read_hex_container,
 )
-from hexmap import TERRAIN_NAMES, TERRAINS, HexMap, normalize_margins
+from hexmap import TERRAIN_NAMES, TERRAINS, HexMap, normalize_margins, terrain_color
 try:
     from imagedetect import detect_hex_grid
 except Exception:
@@ -122,6 +122,7 @@ class HexEditorApp:
         self.hex_map = None
         self.selected_cell_id = None
         self.active_terrain = None
+        self.modified = False
         self.zoom = 1.0
         self._render_timer = Timer()
         self._render_timer.Interval = 120
@@ -134,6 +135,7 @@ class HexEditorApp:
         self._build_menu()
         self._build_main_area()
         self._build_status_bar()
+        self.form.FormClosing += self.on_form_closing
     # ---------- 界面构建 ----------
     def _build_menu(self):
         menubar = MenuStrip()
@@ -365,10 +367,11 @@ class HexEditorApp:
     def set_status(self, text):
         self.status_label.Text = text
     def update_title(self):
+        mark = '*' if self.modified else ''
         if self.file_path:
-            self.form.Text = f'{os.path.basename(self.file_path)} - Hex Editor'
+            self.form.Text = f'{mark}{os.path.basename(self.file_path)} - Hex Editor'
         else:
-            self.form.Text = '未命名 - Hex Editor'
+            self.form.Text = f'{mark}未命名 - Hex Editor'
     def show_hex_view(self):
         self.mode = 'hex'
         self.top_bar.Visible = False
@@ -428,7 +431,7 @@ class HexEditorApp:
         )
     def current_payload_and_type(self):
         if self.mode == 'map':
-            terrains = self.hex_map.terrain_map() if self.hex_map is not None else None
+            terrains = self.hex_map.terrain_cells() if self.hex_map is not None else None
             return make_hex_map_payload(
                 self.map_paper, self.map_cols, self.map_width, self.map_height, self.map_margins, terrains
             ), MAP_TYPE
@@ -455,6 +458,8 @@ class HexEditorApp:
         self.cols_box.Text = str(val)
         self.cols_track.Value = val
         self._syncing = False
+        self.modified = True
+        self.update_title()
         self.update_map_info()
         self.schedule_render()
     def schedule_render(self):
@@ -554,11 +559,10 @@ class HexEditorApp:
         if ml or mr or mt or mb:
             g.SetClip(Rectangle(ml, mt, max(1, self.canvas_box.Width - ml - mr), max(1, self.canvas_box.Height - mt - mb)))
         for key, path in self._grid_paths.items():
-            info = TERRAINS.get(key)
-            if info is None:
+            rgb = terrain_color(key)
+            if rgb is None:
                 continue
-            red, green, blue = info['color']
-            brush = SolidBrush(Color.FromArgb(red, green, blue))
+            brush = SolidBrush(Color.FromArgb(rgb[0], rgb[1], rgb[2]))
             g.FillPath(brush, path)
             brush.Dispose()
         pen = Pen(Color.FromArgb(170, 90, 90, 90), GRID_PEN_WIDTH)
@@ -616,6 +620,8 @@ class HexEditorApp:
         self.selected_cell_id = cell.id
         self.update_cell_info()
         if changed:
+            self.modified = True
+            self.update_title()
             self.schedule_render()
         else:
             self._update_selected_path()
@@ -636,7 +642,10 @@ class HexEditorApp:
         else:
             self.sel_id_label.Text = '编号：#%d' % cell.id
             self.sel_pos_label.Text = '坐标：列 %d / 行 %d' % (cell.q, cell.r)
-            self.terrain_label.Text = '地形：%s' % (cell.terrain or '空地')
+            terrain_name = cell.terrain or '空地'
+            if cell.terrain and not cell.is_known_terrain:
+                terrain_name += '（未知地形）'
+            self.terrain_label.Text = '地形：%s' % terrain_name
             self.cost_label.Text = '移动力消耗：%s' % ('-' if cell.move_cost is None else cell.move_cost)
             self.modifier_label.Text = '地形修正：%s' % ('-' if cell.terrain_modifier is None else cell.terrain_modifier)
         counts = self.hex_map.terrain_counts() if self.hex_map is not None else {}
@@ -677,11 +686,28 @@ class HexEditorApp:
     def show_about(self, sender=None, e=None):
         MessageBox.Show(
             self.form,
-            'Hex Editor\n版本 1.1（Python）\n'
+            'Hex Editor\n版本 1.2（Python）\n'
             '创建/保存 .hex 文件；六角格画布支持 A1-A4 纸张与正六边形平铺',
             '关于',
         )
     # ---------- 文件操作 ----------
+    def _confirm_discard(self, action='继续'):
+        """有未保存修改时询问；返回 True 表示可以放弃修改继续。"""
+        if not self.modified:
+            return True
+        result = MessageBox.Show(
+            self.form,
+            '当前画布有未保存的修改，%s会丢失这些修改，确定继续吗？' % action,
+            'Hex Editor - 未保存的修改',
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+        )
+        return result == DialogResult.Yes
+
+    def on_form_closing(self, sender, e):
+        if not self._confirm_discard('关闭窗口'):
+            e.Cancel = True
+
     def _choose_paper_size(self):
         dlg = Form()
         dlg.Text = '新建六角格画布 - 选择纸张尺寸'
@@ -722,6 +748,8 @@ class HexEditorApp:
             return PAPER_ORDER[combo.SelectedIndex]
         return None
     def new_hex_map(self, sender=None, e=None):
+        if not self._confirm_discard('新建画布'):
+            return
         paper = self._choose_paper_size()
         if paper is None:
             return
@@ -729,7 +757,9 @@ class HexEditorApp:
         self.file_bytes = b''
         self.original_type = MAP_TYPE
         self.is_hex_file = False
+        self.modified = False
         self.show_canvas(paper, DEFAULT_COLS)
+        self.update_title()
         self.set_status('已创建空白画布（未保存）：调整格子数后点击“确认格子并保存”')
 
     def on_detect_image(self, sender=None, e=None):
@@ -763,6 +793,8 @@ class HexEditorApp:
             )
             return
         self.show_canvas('CUSTOM', result['cols'], result['width'], result['height'], result['margins'])
+        self.modified = True
+        self.update_title()
         m = result['margins']
         self.set_status(
             f'已从图片识别：{result["cols"]} 列，边距 左{m["l"]} 上{m["t"]} 右{m["r"]} 下{m["b"]} px（未保存）'
@@ -776,6 +808,8 @@ class HexEditorApp:
         else:
             self.save_as()
     def open_file(self, sender=None, e=None):
+        if not self._confirm_discard('打开其他文件'):
+            return
         dlg = OpenFileDialog()
         dlg.Title = '打开文件'
         dlg.Filter = 'Hex 文件 (*.hex)|*.hex|' + IMAGE_FILTER
@@ -793,6 +827,7 @@ class HexEditorApp:
                     self.original_type = info['original_type']
                     self.is_hex_file = True
                     self.file_path = dlg.FileName
+                    self.modified = False
                     self.update_title()
                     self.show_canvas(
                         map_doc['paper'], map_doc['cols'], map_doc['width'], map_doc['height'], map_doc['margins']
@@ -800,6 +835,14 @@ class HexEditorApp:
                     terrain_count = 0
                     if map_doc.get('terrains') and self.hex_map is not None:
                         terrain_count = self.hex_map.apply_terrains(map_doc['terrains'])
+                        unknown = self.hex_map.unknown_terrains()
+                        if unknown:
+                            MessageBox.Show(
+                                self.form,
+                                '文件里有 %d 个未知地形名：%s\n这些格子会以灰色显示，并原样保留。'
+                                % (len(unknown), '、'.join(unknown)),
+                                'Hex Editor - 未知地形',
+                            )
                         self.update_cell_info()
                         self.schedule_render()
                     w, h = map_canvas_size(map_doc['paper'], map_doc['width'], map_doc['height'])
@@ -856,6 +899,7 @@ class HexEditorApp:
             self.file_bytes = payload
             self.original_type = otype
             self.is_hex_file = True
+            self.modified = False
             self.update_title()
             self.set_status(f'已保存 .hex 文件 {dlg.FileName}（内含类型：{otype}）')
             return True
@@ -873,6 +917,8 @@ class HexEditorApp:
                 f.write(data)
             self.file_bytes = payload
             self.original_type = otype
+            self.modified = False
+            self.update_title()
             self.set_status(f'已保存 {self.file_path}（内含类型：{otype}）')
         except Exception as ex:
             MessageBox.Show(self.form, f'保存失败：{ex}', 'Hex Editor - 错误')
