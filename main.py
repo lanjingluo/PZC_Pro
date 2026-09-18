@@ -7,7 +7,18 @@
 通过顶部输入框或滑块调整横向格子数，格子大小随纸张尺寸与格子数自动计算；确认格子后再保存，也可从图片识别格子布局。
 """
 import os
-import clr
+
+try:
+    import clr
+except ImportError:
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(
+        0,
+        '缺少依赖 pythonnet，程序无法启动。\n\n请在命令行执行：\n    python -m pip install pythonnet',
+        'Hex Editor - 缺少依赖',
+        0x10,
+    )
+    raise SystemExit(1)
 clr.AddReference('System.Windows.Forms')
 clr.AddReference('System.Drawing')
 import System.Windows.Forms
@@ -58,7 +69,11 @@ from hexformat import (
     parse_hex_map_payload,
     read_hex_container,
 )
-from imagedetect import detect_hex_grid
+from hexmap import HexMap, normalize_margins
+try:
+    from imagedetect import detect_hex_grid
+except Exception:
+    detect_hex_grid = None
 MAX_DISPLAY_BYTES = 512 * 1024
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVES_DIR = os.path.join(PROJECT_DIR, 'saves')
@@ -100,6 +115,7 @@ class HexEditorApp:
         self.map_margins = {}
         self._syncing = False
         self._grid_path = None
+        self.hex_map = None
         self.zoom = 1.0
         self._render_timer = Timer()
         self._render_timer.Interval = 120
@@ -295,6 +311,7 @@ class HexEditorApp:
             self._grid_path.Dispose()
             self._grid_path = None
         self.canvas_box.Invalidate()
+        self.rebuild_hex_map()
         self.update_map_info()
         self.schedule_render()
         self.update_title()
@@ -313,8 +330,12 @@ class HexEditorApp:
                 f'T{self.map_margins.get("t", 0)} R{self.map_margins.get("r", 0)} '
                 f'B{self.map_margins.get("b", 0)}'
             )
+        cells_text = ''
+        if self.hex_map is not None:
+            cells_text = f' · 格子 {len(self.hex_map)} 个'
         self.map_info_label.Text = (
-            f'{name} · {w}×{h} px · 格大小 {layout["cell_size"]:.1f} px · 纵向 {layout["rows"]} 行{margins_text}'
+            f'{name} · {w}×{h} px · 格大小 {layout["cell_size"]:.1f} px · 纵向 {layout["rows"]} 行'
+            f'{margins_text}{cells_text}'
         )
     def current_payload_and_type(self):
         if self.mode == 'map':
@@ -353,10 +374,35 @@ class HexEditorApp:
             self._render_timer.Stop()
         self._render_timer.Start()
 
+    def rebuild_hex_map(self):
+        """按当前画布参数重建格子集合与相邻关系；参数未变时直接复用。
+
+        返回 True 表示本次真的重建了。
+        """
+        if self.mode != 'map':
+            return False
+        w, h = map_canvas_size(self.map_paper, self.map_width, self.map_height)
+        margins = normalize_margins(self.map_margins)
+        current = self.hex_map
+        if (current is not None and current.cols == self.map_cols and current.width == w
+                and current.height == h and current.margins == margins):
+            return False
+        previous = current
+        if current is not None and (current.width != w or current.height != h or current.margins != margins):
+            previous = None
+        self.hex_map = HexMap(self.map_cols, w, h, margins, previous=previous)
+        return True
+
     def on_render_timer_tick(self, sender, e):
         self._render_timer.Stop()
         if self.mode != 'map':
             return
+        if self.rebuild_hex_map() and self.hex_map is not None:
+            stats = self.hex_map.summary()
+            self.set_status(
+                '画布就绪：%d 个格子，%d 条相邻边（连通：%s）'
+                % (stats['cells'], stats['edges'], '是' if stats['connected'] else '否')
+            )
         self.render_grid_path()
         self.canvas_box.Invalidate()
         self.update_map_info()
@@ -433,7 +479,7 @@ class HexEditorApp:
     def show_about(self, sender=None, e=None):
         MessageBox.Show(
             self.form,
-            'Hex Editor\n版本 0.9（Python）\n'
+            'Hex Editor\n版本 1.0（Python）\n'
             '创建/保存 .hex 文件；六角格画布支持 A1-A4 纸张与正六边形平铺',
             '关于',
         )
@@ -489,6 +535,13 @@ class HexEditorApp:
         self.set_status('已创建空白画布（未保存）：调整格子数后点击“确认格子并保存”')
 
     def on_detect_image(self, sender=None, e=None):
+        if detect_hex_grid is None:
+            MessageBox.Show(
+                self.form,
+                '缺少 numpy / Pillow 依赖，无法识别图片。\n请执行：python -m pip install numpy pillow',
+                'Hex Editor - 缺少依赖',
+            )
+            return
         dlg = OpenFileDialog()
         dlg.Title = '选择包含六角格网格的图片'
         dlg.Filter = IMAGE_FILTER
