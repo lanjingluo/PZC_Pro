@@ -1,0 +1,302 @@
+{
+  "v": 1,
+  "types": {
+    "步兵营": {
+      "type": "步兵营",
+      "soft_attack": 12,
+      "hard_attack": 2,
+      "defense": 14,
+      "move": 4,
+      "move_type": "徒步",
+      "branch": "步兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "装甲营": {
+      "type": "装甲营",
+      "soft_attack": 20,
+      "hard_attack": 24,
+      "defense": 22,
+      "move": 7,
+      "move_type": "履带",
+      "branch": "装甲",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "机械化步兵营": {
+      "type": "机械化步兵营",
+      "soft_attack": 16,
+      "hard_attack": 8,
+      "defense": 18,
+      "move": 6,
+      "move_type": "半履带",
+      "branch": "步兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "骑兵营": {
+      "type": "骑兵营",
+      "soft_attack": 10,
+      "hard_attack": 2,
+      "defense": 10,
+      "move": 8,
+      "move_type": "骑兵",
+      "branch": "骑兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "炮兵营": {
+      "type": "炮兵营",
+      "soft_attack": 26,
+      "hard_attack": 6,
+      "defense": 6,
+      "move": 3,
+      "move_type": "摩托化",
+      "branch": "炮兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "反坦克营": {
+      "type": "反坦克营",
+      "soft_attack": 4,
+      "hard_attack": 28,
+      "defense": 10,
+      "move": 5,
+      "move_type": "摩托化",
+      "branch": "反坦克",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "防空营": {
+      "type": "防空营",
+      "soft_attack": 8,
+      "hard_attack": 6,
+      "defense": 8,
+      "move": 4,
+      "move_type": "摩托化",
+      "branch": "防空",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "侦察连": {
+      "type": "侦察连",
+      "soft_attack": 6,
+      "hard_attack": 6,
+      "defense": 8,
+      "move": 8,
+      "move_type": "摩托化",
+      "branch": "侦察",
+      "establishment": "连",
+      "breakthrough": 0
+    },
+    "工兵连": {
+      "type": "工兵连",
+      "soft_attack": 8,
+      "hard_attack": 4,
+      "defense": 10,
+      "move": 4,
+      "move_type": "徒步",
+      "branch": "工兵",
+      "establishment": "连",
+      "breakthrough": 0
+    },
+    "指挥部": {
+      "type": "指挥部",
+      "soft_attack": 2,
+      "hard_attack": 0,
+      "defense": 6,
+      "move": 6,
+      "move_type": "摩托化",
+      "branch": "指挥部",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "航空中队": {
+      "type": "航空中队",
+      "soft_attack": 18,
+      "hard_attack": 16,
+      "defense": 4,
+      "move": 0,
+      "move_type": "航空",
+      "branch": "航空",
+      "establishment": "连",
+      "breakthrough": 0
+    },
+    "轻型步兵营": {
+      "type": "轻型步兵营",
+      "soft_attack": 10,
+      "hard_attack": 1,
+      "defense": 12,
+      "move": 5,
+      "move_type": "徒步",
+      "branch": "步兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "山地步兵营": {
+      "type": "山地步兵营",
+      "soft_attack": 12,
+      "hard_attack": 2,
+      "defense": 15,
+      "move": 4,
+      "move_type": "徒步",
+      "branch": "步兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "空降步兵营": {
+      "type": "空降步兵营",
+      "soft_attack": 13,
+      "hard_attack": 3,
+      "defense": 13,
+      "move": 4,
+      "move_type": "徒步",
+      "branch": "步兵",
+      "establishment": "营",
+      "breakthrough": 1
+    },
+    "摩托化步兵营": {
+      "type": "摩托化步兵营",
+      "soft_attack": 14,
+      "hard_attack": 4,
+      "defense": 15,
+      "move": 7,
+      "move_type": "摩托化",
+      "branch": "步兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "轻型装甲营": {
+      "type": "轻型装甲营",
+      "soft_attack": 14,
+      "hard_attack": 14,
+      "defense": 16,
+      "move": 8,
+      "move_type": "履带",
+      "branch": "装甲",
+      "establishment": "营",
+      "breakthrough": 1
+    },
+    "重型装甲营": {
+      "type": "重型装甲营",
+      "soft_attack": 24,
+      "hard_attack": 34,
+      "defense": 30,
+      "move": 5,
+      "move_type": "履带",
+      "branch": "装甲",
+      "establishment": "营",
+      "breakthrough": 2
+    },
+    "装甲侦察营": {
+      "type": "装甲侦察营",
+      "soft_attack": 12,
+      "hard_attack": 12,
+      "defense": 12,
+      "move": 9,
+      "move_type": "半履带",
+      "branch": "侦察",
+      "establishment": "营",
+      "breakthrough": 1
+    },
+    "重型炮兵营": {
+      "type": "重型炮兵营",
+      "soft_attack": 34,
+      "hard_attack": 10,
+      "defense": 6,
+      "move": 2,
+      "move_type": "摩托化",
+      "branch": "炮兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "火箭炮营": {
+      "type": "火箭炮营",
+      "soft_attack": 40,
+      "hard_attack": 14,
+      "defense": 5,
+      "move": 4,
+      "move_type": "摩托化",
+      "branch": "炮兵",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "反坦克连": {
+      "type": "反坦克连",
+      "soft_attack": 3,
+      "hard_attack": 22,
+      "defense": 8,
+      "move": 4,
+      "move_type": "摩托化",
+      "branch": "反坦克",
+      "establishment": "连",
+      "breakthrough": 0
+    },
+    "高射炮连": {
+      "type": "高射炮连",
+      "soft_attack": 6,
+      "hard_attack": 5,
+      "defense": 7,
+      "move": 3,
+      "move_type": "摩托化",
+      "branch": "防空",
+      "establishment": "连",
+      "breakthrough": 0
+    },
+    "装甲工兵连": {
+      "type": "装甲工兵连",
+      "soft_attack": 10,
+      "hard_attack": 6,
+      "defense": 12,
+      "move": 6,
+      "move_type": "半履带",
+      "branch": "工兵",
+      "establishment": "连",
+      "breakthrough": 1
+    },
+    "通信连": {
+      "type": "通信连",
+      "soft_attack": 1,
+      "hard_attack": 0,
+      "defense": 4,
+      "move": 6,
+      "move_type": "摩托化",
+      "branch": "通信",
+      "establishment": "连",
+      "breakthrough": 0
+    },
+    "后勤营": {
+      "type": "后勤营",
+      "soft_attack": 1,
+      "hard_attack": 0,
+      "defense": 6,
+      "move": 5,
+      "move_type": "摩托化",
+      "branch": "后勤",
+      "establishment": "营",
+      "breakthrough": 0
+    },
+    "战斗机中队": {
+      "type": "战斗机中队",
+      "soft_attack": 10,
+      "hard_attack": 20,
+      "defense": 5,
+      "move": 0,
+      "move_type": "航空",
+      "branch": "航空",
+      "establishment": "连",
+      "breakthrough": 0
+    },
+    "战斗轰炸机中队": {
+      "type": "战斗轰炸机中队",
+      "soft_attack": 24,
+      "hard_attack": 20,
+      "defense": 4,
+      "move": 0,
+      "move_type": "航空",
+      "branch": "航空",
+      "establishment": "连",
+      "breakthrough": 0
+    }
+  }
+}

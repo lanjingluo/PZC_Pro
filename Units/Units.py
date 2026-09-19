@@ -5,7 +5,7 @@
 | 字段 | 含义 |
 |------|------|
 | name | 单位名字（番号） |
-| type | 类型，对应 TYPE_TEMPLATES 的模板名（如 '装甲营'） |
+| type | 类型，数据文件里的类型名（如 '装甲营'） |
 | soft_attack | 软攻，打步兵等软目标的攻击力 |
 | hard_attack | 硬攻，打装甲等硬目标的攻击力 |
 | defense | 防御 |
@@ -39,7 +39,9 @@ id（编号，挂属与引用都用它）、attached_to（上级编号）、attr
 
 规则集中在这几张表里，按需要改表即可，不用改代码：
 MOVE_TYPES 移动类型、BRANCHES 兵种、BRANCH_MATCHUPS 兵种克制、
-TYPE_TEMPLATES 类型模板、ESTABLISHMENTS 编制名称、MOVE_TERRAIN_PENALTY 地形对移动的影响。
+ESTABLISHMENTS 编制名称、MOVE_TERRAIN_PENALTY 地形对移动的影响、TEMPLATE 新建单位的默认值。
+注意：本模块只有规则和默认值，没有任何具体单位类型的数据——
+那些数据全部放在数据文件 Units/database/units.data（由 database.py 读写）。
 """
 import json
 
@@ -63,54 +65,14 @@ BRANCHES = (
     '侦察', '工兵', '通信', '后勤', '指挥部', '航空',
 )
 
-# 类型模板：类型名 -> 建单位时的默认属性（可逐个覆盖）
-TYPE_TEMPLATES = {
-    '步兵营': {
-        'branch': '步兵', 'soft_attack': 12, 'hard_attack': 2, 'defense': 14,
-        'move': 4, 'move_type': '徒步', 'step': 3, 'establishment': '营',
-    },
-    '装甲营': {
-        'branch': '装甲', 'soft_attack': 20, 'hard_attack': 24, 'defense': 22,
-        'move': 7, 'move_type': '履带', 'step': 3, 'establishment': '营',
-    },
-    '机械化步兵营': {
-        'branch': '步兵', 'soft_attack': 16, 'hard_attack': 8, 'defense': 18,
-        'move': 6, 'move_type': '半履带', 'step': 3, 'establishment': '营',
-    },
-    '骑兵营': {
-        'branch': '骑兵', 'soft_attack': 10, 'hard_attack': 2, 'defense': 10,
-        'move': 8, 'move_type': '骑兵', 'step': 2, 'establishment': '营',
-    },
-    '炮兵营': {
-        'branch': '炮兵', 'soft_attack': 26, 'hard_attack': 6, 'defense': 6,
-        'move': 3, 'move_type': '摩托化', 'step': 2, 'establishment': '营',
-    },
-    '反坦克营': {
-        'branch': '反坦克', 'soft_attack': 4, 'hard_attack': 28, 'defense': 10,
-        'move': 5, 'move_type': '摩托化', 'step': 2, 'establishment': '营',
-    },
-    '防空营': {
-        'branch': '防空', 'soft_attack': 8, 'hard_attack': 6, 'defense': 8,
-        'move': 4, 'move_type': '摩托化', 'step': 2, 'establishment': '营',
-    },
-    '侦察连': {
-        'branch': '侦察', 'soft_attack': 6, 'hard_attack': 6, 'defense': 8,
-        'move': 8, 'move_type': '摩托化', 'step': 1, 'establishment': '连',
-    },
-    '工兵连': {
-        'branch': '工兵', 'soft_attack': 8, 'hard_attack': 4, 'defense': 10,
-        'move': 4, 'move_type': '徒步', 'step': 1, 'establishment': '连',
-    },
-    '指挥部': {
-        'branch': '指挥部', 'soft_attack': 2, 'hard_attack': 0, 'defense': 6,
-        'move': 6, 'move_type': '摩托化', 'step': 1, 'establishment': '营',
-    },
-    '航空中队': {
-        'branch': '航空', 'soft_attack': 18, 'hard_attack': 16, 'defense': 4,
-        'move': 0, 'move_type': '航空', 'step': 1, 'establishment': '连',
-    },
+# 新建单位 / 新建类型时用的通用模板（只是默认值，不含任何具体单位的数据）。
+# 具体有哪些单位类型、各自什么数值，全部存在数据文件 Units/database/units.data 里。
+# 注意：这里没有"数量"——数量属于具体单位（.oob 里的节点），不属于类型数据。
+TEMPLATE = {
+    'branch': '步兵', 'establishment': '营', 'move_type': '徒步',
+    'soft_attack': 0, 'hard_attack': 0, 'defense': 0,
+    'move': 4, 'breakthrough': 0,
 }
-TYPE_NAMES = tuple(TYPE_TEMPLATES)
 
 # 编制名称（规模），给 establishment 字段做参考 / 下拉用
 ESTABLISHMENTS = ('班', '排', '连', '营', '团', '旅', '师', '军', '集团军')
@@ -155,6 +117,18 @@ _FIELDS = frozenset((
 ))
 
 
+def _lookup_type(type_name):
+    """去数据文件（database 模块）里查一个类型的数据；查不到返回 None。
+
+    这里用延迟导入，避免 Units 与 database 两个模块互相 import 时出问题。
+    """
+    try:
+        import database
+    except Exception:
+        return None
+    return database.get(type_name)
+
+
 def branch_multiplier(attacker_branch, target_branch):
     """兵种克制系数：反坦克打装甲之类，查不到返回 1.0。"""
     return float(BRANCH_MATCHUPS.get(attacker_branch, {}).get(target_branch, 1.0))
@@ -171,7 +145,7 @@ class Units:
     """一支单位：上面那张字段表 + 移动、战斗、挂属、存档等操作。
 
     直接构造时所有字段都可以显式传入；更常见的做法是用 from_type()
-    按 TYPE_TEMPLATES 里的模板建单位，再覆盖个别字段。
+    按数据文件（Units/database/units.data）里的类型数据建单位，再覆盖个别字段。
     """
 
     def __init__(self, name='', type='', soft_attack=0, hard_attack=0, defense=0,
@@ -210,15 +184,22 @@ class Units:
     # ---------- 建单位 ----------
     @classmethod
     def from_type(cls, type_name, name=None, **overrides):
-        """按 TYPE_TEMPLATES 建单位：未知类型照样建出来，缺的字段用默认值。
+        """按数据文件里的类型数据建单位：type_name 是 .data 里的类型名。
 
-        type_name 是模板名（'装甲营'、'炮兵营'……）；name 省略时用类型名；
+        数据来自 database（即 Units/database/units.data），本模块不含任何具体单位数据；
+        类型在数据文件里找不到时，按 TEMPLATE 通用模板建，不会报错；
+        name 省略时用类型名；
         其余关键字（step、move、breakthrough……）覆盖模板或默认值。
         """
-        data = dict(TYPE_TEMPLATES.get(type_name, {}))
+        data = dict(TEMPLATE)
+        record = _lookup_type(type_name)
+        if record:
+            data.update({key: value for key, value in record.items() if key in _FIELDS})
         data.update(overrides)
+        passed = {key: value for key, value in data.items()
+                  if key in _FIELDS and key not in ('type', 'name')}
         unit = cls(name=name if name is not None else type_name, type=type_name,
-                   **{key: value for key, value in data.items() if key in _FIELDS})
+                   **passed)
         for key, value in data.items():
             if key not in _FIELDS:
                 unit.set_attr(key, value)
