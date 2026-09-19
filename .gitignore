@@ -21,3 +21,6 @@ Hex_Editor/saves/
 build/
 dist/
 *.spec
+
+# 打包出来的可执行文件（体积大，不进版本库；用 build_launcher_exe.bat 自己生成）
+*.exe
