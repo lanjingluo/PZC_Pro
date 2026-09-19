@@ -16,3 +16,8 @@ Hex_Editor/saves/
 
 # 日志
 *.log
+
+# 打包产物（PyInstaller 的中间文件与 spec）
+build/
+dist/
+*.spec
