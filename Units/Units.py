@@ -16,6 +16,7 @@
 | step | 数量（兵力步数），减到 0 即被歼灭 |
 | branch | 兵种，BRANCHES 里的名字（步兵/装甲/炮兵……） |
 | establishment | 编制（编制表或隶属番号，字符串） |
+| faction | 阵营（所属阵营/国家，字符串） |
 
 另有三个框架字段，不属于游戏属性，只用于组织与存档：
 id（编号，挂属与引用都用它）、attached_to（上级编号）、attrs（自定义扩展数据）。
@@ -150,7 +151,7 @@ def clamp(value, low, high):
 _FIELDS = frozenset((
     'name', 'type', 'soft_attack', 'hard_attack', 'defense', 'move',
     'move_type', 'attached_units', 'breakthrough', 'step', 'branch',
-    'establishment',
+    'establishment', 'faction',
 ))
 
 
@@ -176,7 +177,7 @@ class Units:
     def __init__(self, name='', type='', soft_attack=0, hard_attack=0, defense=0,
                  move=0, move_type='徒步', attached_units=None,
                  breakthrough=0, step=1, branch='步兵', establishment='',
-                 unit_id=None):
+                 faction='', unit_id=None):
         # ---- 游戏属性 ----
         self.name = str(name)                     # 单位名字
         self.type = str(type)                     # 类型
@@ -190,6 +191,7 @@ class Units:
         self.step = int(step)                     # 数量
         self.branch = str(branch)                 # 兵种
         self.establishment = str(establishment)   # 编制
+        self.faction = str(faction)               # 阵营
 
         # ---- 框架字段 ----
         self.id = None if unit_id is None else int(unit_id)   # 编号
@@ -445,6 +447,7 @@ class Units:
             'step_max': self.step_max,
             'branch': self.branch,
             'establishment': self.establishment,
+            'faction': self.faction,
             'attached_to': self.attached_to,
             'attrs': dict(self.attrs),
         }
@@ -471,6 +474,7 @@ class Units:
                    step=data.get('step', 1),
                    branch=data.get('branch', '步兵'),
                    establishment=data.get('establishment', ''),
+                   faction=data.get('faction', ''),
                    unit_id=data.get('id'))
         unit.move_max = int(data.get('move_max', unit.move))
         unit.step_max = max(1, int(data.get('step_max', unit.step)))
