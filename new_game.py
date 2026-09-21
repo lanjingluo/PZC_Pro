@@ -7,6 +7,8 @@
 不需要重新打包 exe；只有改 launcher.py（启动器自己的窗口、按钮）才需要重新打包。
 
 界面背景图：basic_picture_resources/background2.jpg（每次打开窗口都从磁盘读，换图不用重新打包）
+窗口中心是“选择剧本”选项：点开后列出 setup/setupsaves 里已有的 .scenario，
+每张卡片都是这个剧本的图形化预览，点卡片就用初设编辑器打开它的图形化界面。
 """
 import importlib.util
 import os
@@ -28,11 +30,14 @@ except ImportError:
 clr.AddReference('System.Windows.Forms')
 clr.AddReference('System.Drawing')
 
-from System.Drawing import Color, Size
+from System.Drawing import Color, Font, Point, Size
 from System.Windows.Forms import (
     Application,
+    Button,
+    FlatStyle,
     Form,
     FormStartPosition,
+    Label,
     MessageBox,
     MessageBoxButtons,
     MessageBoxIcon,
@@ -46,6 +51,12 @@ MINIMUM_SIZE = Size(600, 400)
 BACKGROUND_MODULE = 'ui_background'
 BACKGROUND_RELATIVE_PATH = os.path.join('basic_picture_resources', 'background2.jpg')
 FALLBACK_BACK_COLOR = Color.FromArgb(32, 34, 38)
+
+# 窗口中心的选项：点开列出已有剧本（列表与缩略图都在 scenario_list.py 里）
+SCENARIO_MODULE = 'scenario_list'
+OPTION_TEXT = '选择剧本'
+OPTION_HINT = '读取 setup/setupsaves 里已有的 .scenario'
+OPTION_BUTTON_SIZE = Size(260, 52)
 
 
 def project_dir():
@@ -93,7 +104,7 @@ def apply_background(form):
 
 
 def build_new_game_window(owner=None):
-    """创建“新建游戏”窗口；目前是空窗口，后续的新游戏界面加在这里。"""
+    """创建“新建游戏”窗口：中心一个选项，点开后变成已有剧本的图形列表。"""
     form = Form()
     form.Text = WINDOW_TITLE
     form.ClientSize = WINDOW_SIZE
@@ -103,6 +114,69 @@ def build_new_game_window(owner=None):
     else:
         form.StartPosition = FormStartPosition.CenterScreen
     apply_background(form)
+
+    page = {'gallery': None}
+
+    option = Button()
+    option.Text = OPTION_TEXT
+    option.Size = OPTION_BUTTON_SIZE
+    option.FlatStyle = FlatStyle.System
+
+    hint = Label()
+    hint.Text = OPTION_HINT
+    hint.AutoSize = True
+    hint.Font = Font('Microsoft YaHei UI', 10)
+    hint.ForeColor = Color.FromArgb(240, 240, 240)
+    hint.BackColor = Color.Transparent
+
+    form.Controls.Add(option)
+    form.Controls.Add(hint)
+
+    def center_options():
+        """选项和提示文字成组居中；窗口缩放时跟着走。"""
+        top = max(0, (form.ClientSize.Height - option.Height - 6 - hint.Height) // 2)
+        option.Location = Point(max(0, (form.ClientSize.Width - option.Width) // 2), top)
+        hint.Location = Point(max(0, (form.ClientSize.Width - hint.Width) // 2), top + option.Height + 6)
+
+    def show_options():
+        gallery = page['gallery']
+        if gallery is not None:
+            form.Controls.Remove(gallery)
+            gallery.Dispose()
+            page['gallery'] = None
+        option.Visible = True
+        hint.Visible = True
+        center_options()
+        option.Focus()
+
+    def show_gallery():
+        if page['gallery'] is not None:
+            return
+        try:
+            module = load_local_module(SCENARIO_MODULE)
+            gallery = module.build_gallery(form, on_back=show_options, on_open=open_scenario)
+        except Exception as exc:
+            show_error('打开剧本列表失败：\n\n%s: %s' % (type(exc).__name__, exc))
+            return
+        page['gallery'] = gallery
+        option.Visible = False
+        hint.Visible = False
+        form.Controls.Add(gallery)
+        gallery.BringToFront()
+
+    def open_scenario(path):
+        """选好剧本＝进入游戏：先把新建游戏窗口关掉，再打开游戏窗口，不叠着两个窗口。"""
+        form.Hide()
+        try:
+            module = load_local_module(SCENARIO_MODULE)
+            module.open_in_game(None, path)      # 前一个窗口已经关了，游戏窗口独立打开
+        finally:
+            form.Close()
+
+    option.Click += lambda sender, event: show_gallery()
+    form.Resize += lambda sender, event: center_options()
+    form.AcceptButton = option          # 回车 = 选择剧本
+    center_options()
     return form
 
 

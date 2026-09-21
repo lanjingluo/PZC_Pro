@@ -213,7 +213,7 @@ def build_sidebar():
 
 
 def on_new_game(owner):
-    """“新建游戏”：调用 new_game.py 打开新游戏窗口。"""
+    """“新建游戏”：切换型按钮——先把启动器收起来，整条流程走完再关掉它。"""
     try:
         module = load_local_module(NEW_GAME_MODULE)
     except Exception as exc:
@@ -225,10 +225,15 @@ def on_new_game(owner):
         show_error('%s.py 里没有找到 %s() 函数。' % (NEW_GAME_MODULE, NEW_GAME_FUNCTION))
         return
 
+    if owner is not None:
+        owner.Hide()                 # 别再留着启动器窗口
     try:
         opener(owner)
     except Exception as exc:
         show_error('新建游戏窗口出错：\n\n%s: %s' % (type(exc).__name__, exc))
+    finally:
+        if owner is not None:
+            owner.Close()            # 游戏流程结束，启动器也关掉（程序随之退出）
 
 
 def on_load_save(owner):
