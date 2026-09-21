@@ -1,0 +1,538 @@
+{
+  "v": 1,
+  "type": "SCENARIO",
+  "map": {
+    "paper": "A1",
+    "cols": 26,
+    "width": 2245,
+    "height": 3179,
+    "margins": {
+      "l": 0,
+      "t": 0,
+      "r": 0,
+      "b": 0
+    },
+    "rows": 34,
+    "cell_size": 56.8354,
+    "source_hex": "A1-26列.hex"
+  },
+  "cells": {
+    "1,0": "树林",
+    "1,2": "城市",
+    "11,4": "城市",
+    "11,6": "城市"
+  },
+  "edges": {},
+  "units": [
+    {
+      "id": 1,
+      "stack": 0,
+      "path": [
+        "第1装甲军",
+        "第1装甲师",
+        "第1装甲掷弹兵团",
+        "第1掷弹兵营"
+      ],
+      "name": "第1掷弹兵营",
+      "level": "营",
+      "type": "机械化步兵营",
+      "branch": "步兵",
+      "faction": "德军",
+      "step": 3,
+      "note": "",
+      "cell": "18,11",
+      "q": 18,
+      "r": 11,
+      "cell_id": 305,
+      "center_px": [
+        1591.39,
+        1132.08
+      ]
+    },
+    {
+      "id": 2,
+      "stack": 1,
+      "path": [
+        "第1装甲军",
+        "第1装甲师",
+        "第1装甲掷弹兵团",
+        "第2掷弹兵营"
+      ],
+      "name": "第2掷弹兵营",
+      "level": "营",
+      "type": "摩托化步兵营",
+      "branch": "步兵",
+      "faction": "德军",
+      "step": 3,
+      "note": "",
+      "cell": "18,11",
+      "q": 18,
+      "r": 11,
+      "cell_id": 305,
+      "center_px": [
+        1591.39,
+        1132.08
+      ]
+    },
+    {
+      "id": 3,
+      "stack": 0,
+      "path": [
+        "第1装甲军",
+        "第1装甲师",
+        "第1装甲炮兵团",
+        "第1炮兵营"
+      ],
+      "name": "第1炮兵营",
+      "level": "营",
+      "type": "炮兵营",
+      "branch": "炮兵",
+      "faction": "德军",
+      "step": 2,
+      "note": "",
+      "cell": "21,11",
+      "q": 21,
+      "r": 11,
+      "cell_id": 308,
+      "center_px": [
+        1847.15,
+        1181.3
+      ]
+    },
+    {
+      "id": 4,
+      "stack": 1,
+      "path": [
+        "第1装甲军",
+        "第1装甲师",
+        "第1装甲炮兵团",
+        "第2炮兵营"
+      ],
+      "name": "第2炮兵营",
+      "level": "营",
+      "type": "重型炮兵营",
+      "branch": "炮兵",
+      "faction": "德军",
+      "step": 2,
+      "note": "",
+      "cell": "21,11",
+      "q": 21,
+      "r": 11,
+      "cell_id": 308,
+      "center_px": [
+        1847.15,
+        1181.3
+      ]
+    },
+    {
+      "id": 5,
+      "stack": 2,
+      "path": [
+        "第1装甲军",
+        "第1装甲师",
+        "装甲侦察营"
+      ],
+      "name": "装甲侦察营",
+      "level": "营",
+      "type": "装甲侦察营",
+      "branch": "侦察",
+      "faction": "德军",
+      "step": 2,
+      "note": "",
+      "cell": "21,11",
+      "q": 21,
+      "r": 11,
+      "cell_id": 308,
+      "center_px": [
+        1847.15,
+        1181.3
+      ]
+    },
+    {
+      "id": 6,
+      "stack": 0,
+      "path": [
+        "第1装甲军",
+        "第1装甲师",
+        "装甲工兵连"
+      ],
+      "name": "装甲工兵连",
+      "level": "连",
+      "type": "装甲工兵连",
+      "branch": "工兵",
+      "faction": "德军",
+      "step": 1,
+      "note": "",
+      "cell": "17,9",
+      "q": 17,
+      "r": 9,
+      "cell_id": 252,
+      "center_px": [
+        1506.14,
+        984.42
+      ]
+    },
+    {
+      "id": 7,
+      "stack": 0,
+      "path": [
+        "第1装甲军",
+        "第2装甲掷弹兵师",
+        "第2装甲掷弹兵团",
+        "第4掷弹兵营"
+      ],
+      "name": "第4掷弹兵营",
+      "level": "营",
+      "type": "机械化步兵营",
+      "branch": "步兵",
+      "faction": "德军",
+      "step": 3,
+      "note": "",
+      "cell": "21,12",
+      "q": 21,
+      "r": 12,
+      "cell_id": 334,
+      "center_px": [
+        1847.15,
+        1279.74
+      ]
+    },
+    {
+      "id": 8,
+      "stack": 3,
+      "path": [
+        "第1装甲军",
+        "第2装甲掷弹兵师",
+        "第2装甲团",
+        "第3装甲营"
+      ],
+      "name": "第3装甲营",
+      "level": "营",
+      "type": "轻型装甲营",
+      "branch": "装甲",
+      "faction": "德军",
+      "step": 3,
+      "note": "",
+      "cell": "21,11",
+      "q": 21,
+      "r": 11,
+      "cell_id": 308,
+      "center_px": [
+        1847.15,
+        1181.3
+      ]
+    },
+    {
+      "id": 9,
+      "stack": 0,
+      "path": [
+        "第1装甲军",
+        "第2装甲掷弹兵师",
+        "反坦克营"
+      ],
+      "name": "反坦克营",
+      "level": "营",
+      "type": "反坦克营",
+      "branch": "反坦克",
+      "faction": "德军",
+      "step": 2,
+      "note": "",
+      "cell": "10,9",
+      "q": 10,
+      "r": 9,
+      "cell_id": 245,
+      "center_px": [
+        909.37,
+        935.2
+      ]
+    },
+    {
+      "id": 10,
+      "stack": 0,
+      "path": [
+        "第1装甲军",
+        "第2装甲掷弹兵师",
+        "第2炮兵团",
+        "第3炮兵营"
+      ],
+      "name": "第3炮兵营",
+      "level": "营",
+      "type": "炮兵营",
+      "branch": "炮兵",
+      "faction": "德军",
+      "step": 2,
+      "note": "",
+      "cell": "11,11",
+      "q": 11,
+      "r": 11,
+      "cell_id": 298,
+      "center_px": [
+        994.62,
+        1181.3
+      ]
+    },
+    {
+      "id": 11,
+      "stack": 0,
+      "path": [
+        "第1装甲军",
+        "军属炮兵旅",
+        "重型炮兵营"
+      ],
+      "name": "重型炮兵营",
+      "level": "营",
+      "type": "重型炮兵营",
+      "branch": "炮兵",
+      "faction": "德军",
+      "step": 2,
+      "note": "",
+      "cell": "9,11",
+      "q": 9,
+      "r": 11,
+      "cell_id": 296,
+      "center_px": [
+        824.11,
+        1181.3
+      ]
+    }
+  ],
+  "oob": {
+    "file": "army.oob",
+    "army": "第1装甲军",
+    "faction": "德军",
+    "root": {
+      "name": "第1装甲军",
+      "level": "军",
+      "type": "",
+      "step": 0,
+      "note": "",
+      "children": [
+        {
+          "name": "第1装甲师",
+          "level": "师",
+          "type": "",
+          "step": 0,
+          "note": "",
+          "children": [
+            {
+              "name": "第1装甲团",
+              "level": "团",
+              "type": "",
+              "step": 0,
+              "note": "",
+              "children": [
+                {
+                  "name": "第1装甲营",
+                  "level": "营",
+                  "type": "装甲营",
+                  "step": 3,
+                  "note": "",
+                  "children": []
+                },
+                {
+                  "name": "第2装甲营",
+                  "level": "营",
+                  "type": "装甲营",
+                  "step": 3,
+                  "note": "",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "name": "第1装甲掷弹兵团",
+              "level": "团",
+              "type": "",
+              "step": 0,
+              "note": "",
+              "children": [
+                {
+                  "name": "第1掷弹兵营",
+                  "level": "营",
+                  "type": "机械化步兵营",
+                  "step": 3,
+                  "note": "",
+                  "children": []
+                },
+                {
+                  "name": "第2掷弹兵营",
+                  "level": "营",
+                  "type": "摩托化步兵营",
+                  "step": 3,
+                  "note": "",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "name": "第1装甲炮兵团",
+              "level": "团",
+              "type": "",
+              "step": 0,
+              "note": "",
+              "children": [
+                {
+                  "name": "第1炮兵营",
+                  "level": "营",
+                  "type": "炮兵营",
+                  "step": 2,
+                  "note": "",
+                  "children": []
+                },
+                {
+                  "name": "第2炮兵营",
+                  "level": "营",
+                  "type": "重型炮兵营",
+                  "step": 2,
+                  "note": "",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "name": "装甲侦察营",
+              "level": "营",
+              "type": "装甲侦察营",
+              "step": 2,
+              "note": "",
+              "children": []
+            },
+            {
+              "name": "装甲工兵连",
+              "level": "连",
+              "type": "装甲工兵连",
+              "step": 1,
+              "note": "",
+              "children": []
+            }
+          ]
+        },
+        {
+          "name": "第2装甲掷弹兵师",
+          "level": "师",
+          "type": "",
+          "step": 0,
+          "note": "",
+          "children": [
+            {
+              "name": "第2装甲掷弹兵团",
+              "level": "团",
+              "type": "",
+              "step": 0,
+              "note": "",
+              "children": [
+                {
+                  "name": "第3掷弹兵营",
+                  "level": "营",
+                  "type": "机械化步兵营",
+                  "step": 3,
+                  "note": "",
+                  "children": []
+                },
+                {
+                  "name": "第4掷弹兵营",
+                  "level": "营",
+                  "type": "机械化步兵营",
+                  "step": 3,
+                  "note": "",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "name": "第2装甲团",
+              "level": "团",
+              "type": "",
+              "step": 0,
+              "note": "",
+              "children": [
+                {
+                  "name": "第3装甲营",
+                  "level": "营",
+                  "type": "轻型装甲营",
+                  "step": 3,
+                  "note": "",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "name": "第2炮兵团",
+              "level": "团",
+              "type": "",
+              "step": 0,
+              "note": "",
+              "children": [
+                {
+                  "name": "第3炮兵营",
+                  "level": "营",
+                  "type": "炮兵营",
+                  "step": 2,
+                  "note": "",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "name": "反坦克营",
+              "level": "营",
+              "type": "反坦克营",
+              "step": 2,
+              "note": "",
+              "children": []
+            },
+            {
+              "name": "防空营",
+              "level": "营",
+              "type": "防空营",
+              "step": 2,
+              "note": "",
+              "children": []
+            }
+          ]
+        },
+        {
+          "name": "军属炮兵旅",
+          "level": "旅",
+          "type": "",
+          "step": 0,
+          "note": "",
+          "children": [
+            {
+              "name": "重型炮兵营",
+              "level": "营",
+              "type": "重型炮兵营",
+              "step": 2,
+              "note": "",
+              "children": []
+            },
+            {
+              "name": "火箭炮营",
+              "level": "营",
+              "type": "火箭炮营",
+              "step": 2,
+              "note": "",
+              "children": []
+            }
+          ]
+        },
+        {
+          "name": "军直属通信连",
+          "level": "连",
+          "type": "通信连",
+          "step": 1,
+          "note": "",
+          "children": []
+        },
+        {
+          "name": "军后勤营",
+          "level": "营",
+          "type": "后勤营",
+          "step": 2,
+          "note": "",
+          "children": []
+        }
+      ]
+    }
+  }
+}

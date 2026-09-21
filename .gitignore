@@ -22,5 +22,11 @@ build/
 dist/
 *.spec
 
+# 初设窗口自己的界面状态（每台机器各自记栏开关与宽度）
+setup/setup_ui.json
+
+# 初设窗口的布局自检报告（setup.py 生成，含本机窗口与屏幕尺寸）
+setup/setupsaves/layout_report.txt
+
 # 打包出来的可执行文件（体积大，不进版本库；用 build_launcher_exe.bat 自己生成）
 *.exe
