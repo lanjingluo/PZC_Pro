@@ -21,6 +21,7 @@
 
 点没有放单位的格子＝选中该格里的**全部**单位（右侧栏列出它们）；
 右侧栏可以逐条勾选/取消，只对其中一部分做操作：
+    右键点地图或右侧列表＝取消全部勾选，并退出“移动/放置”状态，
     「移除选中 (Del)」删除勾选的单位，
     「移动选中到…」再点目标格子＝把勾选的单位整体搬过去，
     「全选」/「取消勾选」批量调整。
@@ -49,7 +50,7 @@ except ImportError:
 
     ctypes.windll.user32.MessageBoxW(
         0,
-        '缺少依赖 pythonnet，程序无法启动。\n\n请在命令行执行：\n    python -m pip install pythonnet',
+        '缺少依赖 pythonnet，程序无法启动。\n\n请先在项目根目录运行 setup_env.bat 创建虚拟环境并安装依赖，\n或手动执行：\n    python -m pip install -r requirements.txt',
         '初设 - 缺少依赖',
         0x10,
     )
@@ -167,13 +168,19 @@ LEVEL_MARKS = {
     '班': '•', '排': '••', '连': 'I', '营': 'II', '团': 'III',
     '旅': 'X', '师': 'XX', '军': 'XXX', '集团军': 'XXXX',
 }
-# 阵营配色（军标框颜色）：名字里带颜色字就按字面取色，否则按名字稳定散列
-FACTION_COLORS = {
-    '红': (198, 60, 60), '蓝': (58, 110, 200), '绿': (66, 145, 86),
-    '黄': (188, 148, 40), '白': (140, 140, 140), '黑': (70, 70, 70),
-}
-FACTION_PALETTE = ((198, 60, 60), (58, 110, 200), (66, 145, 86),
-                   (188, 148, 40), (140, 100, 190), (120, 120, 120))
+# 阵营配色：名字里带颜色/国别关键字就按字面取色，其余按调色板依次分配，
+# 同一个剧本里保证每个阵营颜色互不相同（并写进 .scenario，重开后不变）
+FACTION_COLOR_WORDS = (
+    ('红', (198, 60, 60)), ('苏', (198, 60, 60)), ('共产主义', (198, 60, 60)),
+    ('蓝', (58, 110, 200)), ('美', (58, 110, 200)), ('北约', (58, 110, 200)),
+    ('绿', (66, 145, 86)), ('英', (118, 138, 72)),
+    ('黄', (188, 148, 40)), ('德', (104, 112, 102)),
+    ('日', (196, 116, 148)), ('白', (150, 150, 150)), ('黑', (70, 70, 70)),
+    ('紫', (150, 96, 190)), ('青', (60, 160, 165)), ('橙', (205, 120, 60)),
+)
+FACTION_PALETTE = ((198, 60, 60), (58, 110, 200), (66, 145, 86), (188, 148, 40),
+                   (150, 96, 190), (60, 160, 165), (205, 120, 60), (104, 112, 102),
+                   (196, 116, 148), (120, 120, 120))
 
 
 def project_dir():
@@ -380,12 +387,21 @@ def parse_map_doc(payload):
     }
 
 
-def faction_color(faction):
-    """阵营 → RGB：名字里有“红/蓝/绿…”就按字面取色，否则按名字稳定散列。"""
+def faction_word_color(faction):
+    """名字里带颜色/国别关键字的阵营 → RGB；没有关键字返回 None。"""
     text = str(faction or '')
-    for key, rgb in FACTION_COLORS.items():
+    for key, rgb in FACTION_COLOR_WORDS:
         if key in text:
             return rgb
+    return None
+
+
+def faction_color(faction):
+    """兜底配色（没有分配过调色板时用）：关键字优先，否则按名字稳定散列。"""
+    word = faction_word_color(faction)
+    if word is not None:
+        return word
+    text = str(faction or '')
     if not text:
         return FACTION_PALETTE[-1]
     total = sum(ord(ch) for ch in text)
@@ -505,6 +521,8 @@ class SetupWindow:
         self._panel_manual = False        # 用户拖过分隔条后，宽度不再自动变
         self._side_open = True            # 左栏是否打开（用户可关）
         self._select_open = True          # 右栏是否打开
+        self.faction_colors = {}          # 阵营 -> RGB（同一个剧本里互不相同）
+        self._faction_signature = None    # 用来判断要不要重算配色
         self.selected_node = None        # 左侧编制树里选中的节点（选中即可往地图上放）
         self.deployments = []            # 已部署单位：[{'node':..., 'path':[...], 'q':..., 'r':...}]
         self.scenario_path = None
@@ -757,6 +775,7 @@ class SetupWindow:
         self.selection_box.ForeColor = PANEL_TEXT_COLOR
         self.selection_box.BorderStyle = getattr(BorderStyle, 'None')
         self.selection_box.ItemCheck += self.on_selection_item_check
+        self.selection_box.MouseDown += self.on_selection_list_mouse_down
         self.select_panel.Controls.Add(self.selection_box)
 
         self._make_panel_header(self.select_panel, '选中单位', self.on_toggle_select_click)
@@ -906,6 +925,8 @@ class SetupWindow:
         self.selection_cell = None
         self.cell_records = []
         self.move_mode = False
+        self.faction_colors = {}
+        self._faction_signature = None
         self.oob_path = None
         self.oob_summary = None
         self.source_hex_name = None
@@ -1073,6 +1094,10 @@ class SetupWindow:
         lines.append('缩放：%.1f%%（上限 %.1f%%）；地图：%s；已部署 %d'
                      % (self.zoom * 100, self.max_zoom() * 100,
                         self.map_size if self.map_size else '未打开', len(self.deployments)))
+        palette = self.ensure_faction_colors()
+        lines.append('阵营配色：%s'
+                     % ('；'.join('%s = #%02X%02X%02X' % (name, rgb[0], rgb[1], rgb[2])
+                                 for name, rgb in sorted(palette.items())) or '（暂无）'))
         lines.append('')
         lines.append('控件矩形（只列可见项）：')
         problems = []
@@ -1298,34 +1323,36 @@ class SetupWindow:
         self.update_sel_label()
         kept, dropped = self.remap_deployments()
         if dropped:
-            self.set_status('新编制里找不到这些已部署单位，已丢弃它们的部署：%s'
-                            % '、'.join(dropped[:4]))
+            self.set_status('已换成新编制；%d 个部署沿用原编制（不在当前编制里）：%s'
+                            % (len(dropped), '、'.join(dropped[:4])))
         self.report_oob_problems()
         return True
 
     def remap_deployments(self):
         """换了一份编制后，把已有部署按“名字路径”重新挂到新节点对象上。
 
-        返回（保留数, 丢弃的名字列表）。不做这一步的话，同一个单位会因为是新对象
-        而被当成没部署过，重复落子。
+        找不到对应节点的（通常是另一个阵营的编制，比如德军编制里没有苏军单位）
+        原样保留，绝不清掉部署。返回（保留数, 沿用原编制的名字列表）。
+        不做这一步的话，同一个单位会因为是新对象而被当成没部署过，重复落子。
         """
         if not self.deployments:
             return 0, []
         root = oob.root() if OOB_IMPORT_ERROR is None else None
         kept = []
-        dropped = []
+        kept_foreign = []
         for record in self.deployments:
             node = self.find_node_by_path(root, record.get('path') or [])
             if node is None:
-                dropped.append(record.get('name') or '?')
+                kept.append(record)                  # 属于别的阵营，保留原样
+                kept_foreign.append(record.get('name') or '?')
                 continue
             fresh = self.node_record(node)
-            for key in ('q', 'r', 'cell_id', 'cell', 'center_px'):
+            for key in ('q', 'r', 'cell_id', 'cell', 'center_px', 'faction'):
                 if key in record:
                     fresh[key] = record[key]
             kept.append(fresh)
         self.deployments = kept
-        return len(kept), dropped
+        return len(kept), kept_foreign
 
     def update_oob_label(self):
         """状态栏右侧显示编制概况与部署数量。"""
@@ -1447,7 +1474,8 @@ class SetupWindow:
         elif oob.root() is not None:
             oob_note = '（初设里没有编制快照，沿用当前编制）'
 
-        placed, missing = self.apply_scenario_units(data.get('units') or [])
+        placed, data_only = self.apply_scenario_units(data.get('units') or [])
+        self.load_scenario_factions(data.get('factions'))
         self.selected_records = []
         self.selection_cell = None
         self.cell_records = []
@@ -1463,9 +1491,9 @@ class SetupWindow:
                 % (os.path.basename(path), '自定义' if self.map_paper == 'CUSTOM' else self.map_paper,
                    self.map_cols, len(self.hex_map), len(data.get('cells') or {}),
                    len(data.get('edges') or {}), placed, oob_note))
-        if missing:
-            text += ' · 有 %d 条部署找不到对应单位/格子：%s' % (
-                len(missing), '、'.join(missing[:3]) + ('…' if len(missing) > 3 else ''))
+        if data_only:
+            text += ' · 其中 %d 个按文件字段恢复（不在当前编制里）：%s' % (
+                len(data_only), '、'.join(data_only[:3]) + ('…' if len(data_only) > 3 else ''))
         self.set_status(text)
         return True
 
@@ -1486,26 +1514,45 @@ class SetupWindow:
         return None
 
     def apply_scenario_units(self, units):
-        """按初设里的部署重建军标，返回（成功数, 找不到的列表）。"""
+        """按初设里的部署重建军标，返回（成功数, 只按文件字段恢复的名字列表）。
+
+        找不到对应编制节点的（另一个阵营的单位、或编制改过了）按文件里的字段
+        原样恢复，绝不丢部署。
+        """
         self.deployments = []
         placed = 0
-        missing = []
+        data_only = []
         root = oob.root() if OOB_IMPORT_ERROR is None else None
         for item in units:
             name = item.get('name') or '?'
-            node = self.find_node_by_path(root, item.get('path') or [])
-            if node is None:
-                missing.append(name)
-                continue
             cell = None
             try:
                 cell = self.hex_map.cell_at(int(item.get('q', -1)), int(item.get('r', -1)))
             except (TypeError, ValueError):
                 cell = None
             if cell is None:
-                missing.append('%s（格子 %s）' % (name, item.get('cell')))
+                data_only.append('%s（格子 %s 不在图上）' % (name, item.get('cell')))
                 continue
-            record = self.node_record(node)
+
+            node = self.find_node_by_path(root, item.get('path') or [])
+            if node is not None:
+                record = self.node_record(node)      # 阵营跟着节点走（自动继承）
+            else:
+                # 别的阵营（或编制已改）：用文件里的字段恢复
+                record = {
+                    'node': None,
+                    'path': list(item.get('path') or []),
+                    'name': name,
+                    'level': item.get('level') or '',
+                    'type': item.get('type') or '',
+                    'step': item.get('step') or 0,
+                    'note': item.get('note') or '',
+                    'faction': item.get('faction') or '',
+                    'branch': item.get('branch') or '',
+                }
+                data_only.append(name)
+                if item.get('faction'):
+                    record['faction'] = item['faction']  # 找不到节点时用文件里记的阵营
             record.update({
                 'cell': item.get('cell') or '%d,%d' % (cell.q, cell.r),
                 'q': cell.q,
@@ -1515,7 +1562,22 @@ class SetupWindow:
             })
             self.deployments.append(record)
             placed += 1
-        return placed, missing
+        return placed, data_only
+
+    def load_scenario_factions(self, factions):
+        """沿用初设里存的阵营配色（这样重新打开时颜色不变）。"""
+        if not isinstance(factions, dict) or not factions:
+            return self.faction_colors
+        colors = {}
+        for name, rgb in factions.items():
+            try:
+                colors[str(name)] = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+        if colors:
+            self.faction_colors = colors
+            self._faction_signature = None      # 让 ensure 核对一遍（已有颜色会保留）
+        return self.faction_colors
 
     # ---------- 左侧编制树 ----------
     def refresh_oob_tree(self):
@@ -1533,26 +1595,41 @@ class SetupWindow:
                 hint = TreeNode('（还没有编制：点上方“打开 .oob 编制...”加载）')
                 self.oob_tree.Nodes.Add(hint)
                 return
-            self._add_tree_nodes(self.oob_tree.Nodes, root)
+            self._add_tree_nodes(self.oob_tree.Nodes, root, self.ensure_faction_colors())
         finally:
             self.oob_tree.EndUpdate()
         self.oob_tree.ExpandAll()
         self.sync_tree_selection(self.selected_node)
 
-    def _add_tree_nodes(self, collection, node):
+    def tree_text_color(self, rgb):
+        """树里文字的颜色：阵营色太暗就在深色底上提亮一点，保证看得清。"""
+        if rgb is None:
+            return Color.FromArgb(235, 235, 235)
+        luma = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        if luma < 110:
+            rgb = tuple(int(round(value + (255 - value) * 0.45)) for value in rgb)
+        return Color.FromArgb(rgb[0], rgb[1], rgb[2])
+
+    def _add_tree_nodes(self, collection, node, palette=None):
         item = TreeNode(self.node_text(node))
         item.Tag = node
+        if palette:
+            item.ForeColor = self.tree_text_color(palette.get(self.node_faction(node)))
         collection.Add(item)
         for child in node.children:
-            self._add_tree_nodes(item.Nodes, child)
+            self._add_tree_nodes(item.Nodes, child, palette)
 
     def node_text(self, node):
-        """树里的节点文字：番号（级别 · 类型 · 数量），已部署的加 ● 前缀。"""
+        """树里的节点文字：番号（级别 · 类型 · 数量 · 阵营），已部署的加 ● 前缀。"""
         info = [node.level or '?']
         if node.type:
             info.append(node.type)
         if node.step:
             info.append('%d 步' % node.step)
+        faction = self.node_faction(node)
+        army_faction = '' if OOB_IMPORT_ERROR is not None else (oob.FACTION or '')
+        if faction and faction != army_faction:      # 和军队阵营不同才写出来，免得刷屏
+            info.append(faction)
         mark = '● ' if self.find_deployment(node=node) is not None else ''
         return '%s%s（%s）' % (mark, node.name or '（未命名）', ' · '.join(info))
 
@@ -1682,11 +1759,14 @@ class SetupWindow:
             cell.id if cell else '?', q, r, len(self.cell_records), mode)
 
     def on_selection_item_check(self, sender, e):
-        """勾选状态变化 → 更新选中集合。"""
+        """勾选状态变化 → 更新选中集合（改过勾选就退出“移动中”状态，免得误搬）。"""
         if self._filling_selection:
             return
         if not (0 <= e.Index < len(self.cell_records)):
             return
+        if self.move_mode:
+            self.move_mode = False
+            self.set_status('勾选变了，已退出“移动中”；要搬动请重新点「移动选中到…」')
         record = self.cell_records[e.Index]
         if e.NewValue == CheckState.Checked:
             if not self.is_selected(record):
@@ -1695,6 +1775,11 @@ class SetupWindow:
             self.selected_records = [item for item in self.selected_records if item is not record]
         self.update_selection_label()
         self.canvas_box.Invalidate()
+
+    def on_selection_list_mouse_down(self, sender, e):
+        """在右侧列表上点右键＝取消全部勾选。"""
+        if e.Button == MouseButtons.Right:
+            self.clear_selection()
 
     def on_select_all_click(self, sender=None, e=None):
         if not self.cell_records:
@@ -1758,19 +1843,34 @@ class SetupWindow:
             'type': node.type,
             'step': node.step,
             'note': node.note,
-            'faction': '' if OOB_IMPORT_ERROR is not None else oob.FACTION,
+            'faction': self.node_faction(node),      # 按节点自己的阵营（可逐级继承）
             'branch': (capability or {}).get('branch', ''),
         }
 
     def place_node(self, node, cell):
-        """把一个编制节点放到某个格子上（已放过就移动过去；同一格可以堆多个单位）。"""
+        """把一个编制节点放到某个格子上（同一格可以堆多个单位）。
+
+        已经部署在**别的格子**上的单位不会被静默搬走——那样很容易在“只是点一下看看”
+        的时候把部队挪走。这种情况只提示并选中它原来那一格，要搬家请用「移动选中到…」。
+        """
         record = self.find_deployment(node=node)
+        if record is not None and (record.get('q'), record.get('r')) != (cell.q, cell.r):
+            self.move_mode = False
+            current = None
+            if self.hex_map is not None:
+                current = self.hex_map.cell_at(record.get('q'), record.get('r'))
+            if current is not None:
+                self.select_cell(current)
+            self.set_status('%s 已经在 格子 #%s（%s）上；要搬动请点「移动选中到…」，或先 Del 移除'
+                            % (node.name, record.get('cell_id'), record.get('cell')))
+            return False
+
         if record is None:
             record = self.node_record(node)
             self.deployments.append(record)
             action = '已部署'
         else:
-            action = '已移动'
+            action = '已放置'
         record['q'], record['r'], record['cell_id'] = cell.q, cell.r, cell.id
         record['cell'] = '%d,%d' % (cell.q, cell.r)
         record['center_px'] = [round(cell.cx, 2), round(cell.cy, 2)]
@@ -1854,8 +1954,13 @@ class SetupWindow:
         return True
 
     def on_canvas_mouse_down(self, sender, e):
-        """左键点格子：移动选中 → 放置新单位 → 否则选中该格里的全部单位。"""
-        if self.hex_map is None or e.Button != MouseButtons.Left:
+        """左键点格子：移动选中 → 放置新单位 → 否则选中该格里的全部单位；右键＝取消勾选。"""
+        if self.hex_map is None:
+            return
+        if e.Button == MouseButtons.Right:
+            self.clear_selection()
+            return
+        if e.Button != MouseButtons.Left:
             return
         cell = self.hex_map.cell_at_point(e.X / self.zoom, e.Y / self.zoom)
         if cell is None:
@@ -1867,8 +1972,8 @@ class SetupWindow:
             return
 
         if self.selected_node is not None:
-            self.place_node(self.selected_node, cell)
-            self.select_cell(cell)          # 放完顺手选中这一格，方便继续调整
+            if self.place_node(self.selected_node, cell):
+                self.select_cell(cell)      # 放完顺手选中这一格，方便继续调整
             return
 
         self.select_cell(cell)
@@ -1879,6 +1984,18 @@ class SetupWindow:
         else:
             self.set_status('已选中格子 #%d（%d,%d）里的 %d 个单位；右侧可以逐条取消勾选'
                             % (cell.id, cell.q, cell.r, count))
+
+    def clear_selection(self, sender=None, e=None):
+        """取消勾选：右侧全部取消，并退出移动/放置状态（右键、Esc 都走这里）。"""
+        had = len(self.selected_records)
+        self.selected_records = []
+        self.move_mode = False
+        self.selected_node = None
+        self.oob_tree.SelectedNode = None
+        self.refresh_selection_panel()
+        self.update_sel_label()
+        self.canvas_box.Invalidate()
+        self.set_status('已取消勾选（%d 个）并退出移动/放置状态' % had if had else '已退出移动/放置状态')
 
     def on_canvas_mouse_move(self, sender, e):
         """鼠标扫过有单位的格子时状态栏显示信息；贴住视口边缘时开始平移。"""
@@ -2171,14 +2288,21 @@ class SetupWindow:
         self.canvas_box.Invalidate()
 
     def layout_canvas(self):
-        """把画布摆进容器：比视口小就居中；比视口大就贴左上，其余靠滚动条看。
+        """把画布摆进容器，并尽量让它对准**窗口**正中（而不是可视区正中）。
 
+        两栏宽度不一样（比如关掉一栏）时，可视区本身偏在窗口一侧；这里按客户区中心
+        反算画布位置，再夹回可视区范围内，所以地图始终对着窗口中间；
+        画布比可视区大时无法居中，就贴左上，其余靠滚动条看。
         只在“基位”（未滚动时的位置）变化时才动 Location，避免每次重绘把滚动位置顶回原点。
         """
-        view = self.canvas_scroll.ClientSize
+        panel = self.canvas_scroll
         size = self.canvas_box.Size
-        target = (max(0, (view.Width - size.Width) // 2),
-                  max(0, (view.Height - size.Height) // 2))
+        view = panel.ClientSize
+        client = self.form.ClientSize
+        want_x = int(round(client.Width / 2.0 - size.Width / 2.0)) - panel.Bounds.X
+        want_y = int(round(client.Height / 2.0 - size.Height / 2.0)) - panel.Bounds.Y
+        target = (max(0, min(max(0, view.Width - size.Width), want_x)),
+                  max(0, min(max(0, view.Height - size.Height), want_y)))
         if target == self._canvas_base:
             return
         self._canvas_base = target
@@ -2272,6 +2396,94 @@ class SetupWindow:
         self.draw_units(g)
 
     # ---------- 单位军标 ----------
+    def faction_of(self, record):
+        """部署记录属于哪个阵营（没填就给个占位名）。"""
+        return (record or {}).get('faction') or '（未填阵营）'
+
+    def current_oob_faction(self):
+        """当前编制的阵营（还没部署的单位也先占一个颜色）。"""
+        if OOB_IMPORT_ERROR is None and oob.root() is not None:
+            return oob.FACTION or '（未填阵营）'
+        return ''
+
+    def node_faction(self, node):
+        """某个编制节点属于哪个阵营。
+
+        Units/oob.py 里节点可以自带 faction（留空就往上继承，最后用军队阵营），
+        优先用它的 effective_faction()，拿不到再退回军队阵营。
+        """
+        value = ''
+        getter = getattr(node, 'effective_faction', None)
+        if callable(getter):
+            try:
+                value = getter() or ''
+            except Exception:
+                value = ''
+        if not value:
+            value = getattr(node, 'faction', '') or ''
+        if not value and OOB_IMPORT_ERROR is None:
+            value = oob.FACTION or ''
+        return value or '（未填阵营）'
+
+    def oob_factions(self):
+        """当前编制树里出现的所有阵营（按树的顺序去重）。"""
+        names = []
+        if OOB_IMPORT_ERROR is None and oob.root() is not None:
+            for node in oob.root().walk():
+                name = self.node_faction(node)
+                if name and name not in names:
+                    names.append(name)
+        return names
+
+    def ensure_faction_colors(self):
+        """部署或编制变化时重算阵营配色；已经分配过的颜色保持不变。"""
+        names = []
+        for record in self.deployments:
+            name = self.faction_of(record)
+            if name not in names:
+                names.append(name)
+        tree_names = self.oob_factions()
+        signature = (tuple(names), tuple(tree_names))
+        if signature != self._faction_signature:
+            self._faction_signature = signature
+            self.assign_faction_colors(names + tree_names)
+        return self.faction_colors
+
+    def assign_faction_colors(self, names):
+        """分配阵营颜色：名字带关键字就按字面取色，否则取调色板里没用过的颜色。
+
+        同一个剧本里每个阵营的颜色互不相同（同名颜色被占用时自动换一个）。
+        """
+        colors = dict(self.faction_colors)
+        used = {tuple(rgb) for rgb in colors.values()}
+        pending = [name for name in names if name not in colors]
+        # 先安排有颜色关键字的阵营（红军就该是红的、德军就该是原野灰），
+        # 剩下的再按顺序取调色板里没用过的颜色
+        keyword_first = [name for name in pending if faction_word_color(name) is not None]
+        keyword_next = [name for name in pending if faction_word_color(name) is None]
+        for name in keyword_first + keyword_next:
+            if name in colors:
+                continue
+            rgb = faction_word_color(name)
+            if rgb is None or tuple(rgb) in used:
+                rgb = None
+                for candidate in FACTION_PALETTE:
+                    if tuple(candidate) not in used:
+                        rgb = candidate
+                        break
+                if rgb is None:                       # 颜色用完了就按顺序循环
+                    rgb = FACTION_PALETTE[len(colors) % len(FACTION_PALETTE)]
+            colors[name] = tuple(rgb)
+            used.add(tuple(rgb))
+        self.faction_colors = colors
+        return colors
+
+    def symbol_color(self, record):
+        """某个部署记录该用的颜色。"""
+        self.ensure_faction_colors()
+        rgb = self.faction_colors.get(self.faction_of(record))
+        return tuple(rgb) if rgb else faction_color(record.get('faction'))
+
     def draw_units(self, g):
         """把已部署单位画成北约军标；同一格多个单位时在格子里排成小网格。"""
         if self.hex_map is None or not self.deployments:
@@ -2312,12 +2524,15 @@ class SetupWindow:
 
     def draw_unit_symbol(self, g, cx, cy, width, height, record, number=0):
         """画一个军标：阵营色方框 + 兵种符号 + 级别标记 + 类型/番号标注。"""
-        rgb = faction_color(record.get('faction'))
+        rgb = self.symbol_color(record)
         color = Color.FromArgb(rgb[0], rgb[1], rgb[2])
         left = cx - width / 2.0
         top = cy - height / 2.0
 
-        brush = SolidBrush(Color.FromArgb(238, 255, 255, 255))
+        # 方框底色带一点阵营色，远看更容易区分（仍是浅色，符号保持可读）
+        tint = 0.16
+        fill = tuple(int(round(255 - (255 - value) * tint)) for value in rgb)
+        brush = SolidBrush(Color.FromArgb(238, fill[0], fill[1], fill[2]))
         g.FillRectangle(brush, left, top, width, height)
         brush.Dispose()
 
@@ -2408,6 +2623,9 @@ class SetupWindow:
             'edges': edges,
             # 单位部署：每个单位一格，带格子坐标
             'units': units,
+            # 阵营配色：游戏端按这份色表画军标，保证和初设里看到的一致
+            'factions': {name: list(rgb)
+                         for name, rgb in self.ensure_faction_colors().items()},
             # 编制快照：这样初设文件不依赖 .oob 也能被游戏读懂
             'oob': oob_block,
         }

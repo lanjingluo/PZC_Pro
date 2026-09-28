@@ -4,12 +4,14 @@
 - name   番号（如 "第1装甲营"）
 - level  编制级别（LEVELS：集团军/军/师/旅/团/营/连/排/班）
 - type   对应的单位类型名（调用 units.data 里的类型，留空表示纯指挥/架子单位）
+- faction 阵营（如 "德军"；留空表示跟随上级，最后跟随军队阵营）
 - step   数量（兵力步数，0 表示只是个指挥机构）——数量属于具体单位，不在类型数据里
 - note   备注
 - children 下级节点
 
 数据文件默认放在 Units/oob/*.oob，内容是 JSON 文本，可以直接编辑：
     {"v": 1, "army": "第1装甲军", "faction": "德军", "root": {...}}
+其中顶层 faction 是"军队阵营"，节点自己的 faction 是"这支部队的阵营"（可以不同）。
 
 常用做法：
     import oob
@@ -18,6 +20,7 @@
     oob.root()                          # 树根节点
     oob.root().total_step()             # 整支军队的数量合计
     node = oob.root().find('第1装甲营')
+    node.effective_faction()            # 这支部队属于哪个阵营（没填就往上继承）
     node.capability()                   # 这个节点引用的单位类型有什么武器能力
     node.unit()                         # 按类型数据 + 节点数量建一支 Units 实例
     oob.check()                         # 检查各节点的单位类型在 units.data 里是否存在
@@ -26,8 +29,8 @@
 import json
 import os
 
-# 编制级别，从高到低
-LEVELS = ('集团军', '军', '师', '旅', '团', '营', '连', '排', '班')
+# 编制级别，从高到低（战区用来把同一份文件里的几支军队收在一起）
+LEVELS = ('战区', '集团军', '军', '师', '旅', '团', '营', '连', '排', '班')
 
 # 数据目录与默认文件
 OOB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'oob')
@@ -39,10 +42,11 @@ _CURRENT_FILE = None
 class OobNode:
     """编制树上的一个节点（一支具体部队/单位），可以有任意多级下级。"""
 
-    def __init__(self, name='', level='营', type_name='', step=0, note=''):
+    def __init__(self, name='', level='营', type_name='', step=0, note='', faction=''):
         self.name = str(name)
         self.level = str(level)
         self.type = str(type_name)      # units.data 里的类型名，可为空
+        self.faction = str(faction)     # 阵营；留空表示跟随上级 / 军队阵营
         self.step = int(step)
         self.note = str(note)
         self.children = []
@@ -156,6 +160,17 @@ class OobNode:
         return sorted({node.type for node in self.walk() if node.type})
 
     # ---------- 调用单位类型数据 ----------
+    def effective_faction(self):
+        """这支部队属于哪个阵营：自己的 faction，没填就往上继承，最后用军队阵营。"""
+        if self.faction:
+            return self.faction
+        current = self.parent
+        while current is not None:
+            if current.faction:
+                return current.faction
+            current = current.parent
+        return FACTION
+
     def type_record(self):
         """取自己引用的单位类型数据（来自 units.data）；没引用或查不到返回 None。"""
         if not self.type:
@@ -204,7 +219,7 @@ class OobNode:
         return database.create(self.type,
                                name=name or self.name,
                                step=self.step if step is None else step,
-                               faction=faction or FACTION)
+                               faction=faction or self.effective_faction())
 
     # ---------- 序列化 ----------
     def to_dict(self):
@@ -213,6 +228,7 @@ class OobNode:
             'name': self.name,
             'level': self.level,
             'type': self.type,
+            'faction': self.faction,
             'step': self.step,
             'note': self.note,
             'children': [child.to_dict() for child in self.children],
@@ -225,6 +241,7 @@ class OobNode:
         node = cls(name=data.get('name', ''),
                    level=data.get('level', '营'),
                    type_name=data.get('type', ''),
+                   faction=data.get('faction', ''),
                    step=data.get('step', 0),
                    note=data.get('note', ''))
         for item in data.get('children') or ():
@@ -232,9 +249,10 @@ class OobNode:
         return node
 
     def __repr__(self):
-        return 'OobNode(%s [%s]%s, 数量=%d, 下级=%d)' % (
+        return 'OobNode(%s [%s]%s%s, 数量=%d, 下级=%d)' % (
             self.name, self.level,
             ' 类型=%s' % self.type if self.type else '',
+            ' 阵营=%s' % self.faction if self.faction else '',
             self.step, len(self.children),
         )
 
@@ -265,7 +283,29 @@ def root():
 
 def new_tree(name='新建军队', level='军', faction=''):
     """新建一棵只有根节点的编制树，返回根节点。"""
-    return set_root(OobNode(name=name, level=level), army=name, faction=faction)
+    return set_root(OobNode(name=name, level=level, faction=faction),
+                    army=name, faction=faction)
+
+
+def set_army(name=None, faction=None):
+    """改军队名 / 军队阵营（不动树结构）；改名时同步到根节点。"""
+    global ARMY, FACTION
+    if name is not None:
+        ARMY = str(name)
+        if ROOT is not None:
+            ROOT.name = ARMY
+    if faction is not None:
+        FACTION = str(faction)
+    return {'army': ARMY, 'faction': FACTION}
+
+
+def factions():
+    """这棵树里出现过的阵营（含军队阵营），按出现顺序去重返回。"""
+    out = []
+    for value in [FACTION] + [node.faction for node in (ROOT.walk() if ROOT else [])]:
+        if value and value not in out:
+            out.append(value)
+    return out
 
 
 def current_file():
@@ -378,4 +418,5 @@ def summary():
         'step': ROOT.total_step(),
         'levels': ROOT.level_counts(),
         'types': ROOT.used_types(),
+        'factions': factions(),
     }

@@ -58,12 +58,18 @@ from System.Windows.Forms import (
     Panel,
     PictureBox,
     PictureBoxSizeMode,
+    RadioButton,
 )
 
 SCENARIO_SUFFIX = '.scenario'
 SCENARIO_TYPE = 'SCENARIO'
 # 剧本目录（相对项目根目录）：初设编辑器默认存到 setup/setupsaves
 SCENARIO_FOLDERS = (('setup', 'setupsaves'), ('scenarios',))
+
+# 游戏模式：现在只记录选中的模式并带到游戏窗口，具体玩法还没接
+GAME_MODES = ('PVE', 'PVP', 'HOTSEAT')
+DEFAULT_MODE = 'PVE'
+MODE_HINT = '先选定模式，玩法待接入'
 
 EDITOR_FOLDER = 'setup'
 EDITOR_SCRIPT = 'setup.py'
@@ -78,6 +84,7 @@ THUMB_SIZE = Size(CARD_WIDTH - CARD_PADDING * 2, 300)
 
 DARK_BACK = Color.FromArgb(28, 30, 34)
 TOPBAR_BACK = Color.FromArgb(34, 37, 42)
+MODEBAR_BACK = Color.FromArgb(30, 33, 38)
 CARD_BACK = Color.FromArgb(38, 41, 46)
 MAP_MATTE = Color.FromArgb(20, 22, 25)
 MAP_PAPER = Color.FromArgb(58, 60, 64)
@@ -471,7 +478,7 @@ def _bar_button(text, width=96):
     return button
 
 
-def make_card(owner, path, mtime, size, on_open=None):
+def make_card(owner, path, mtime, size, on_open=None, mode_getter=None):
     """一张剧本卡片：缩略图 + 名字 + 概要；点它就用初设编辑器打开这个剧本。
 
     卡片本身用“无边框按钮”当容器：按钮才自带 PerformClick、也认 BM_CLICK，
@@ -536,10 +543,12 @@ def make_card(owner, path, mtime, size, on_open=None):
         if data is None:
             show_error('读取剧本失败：\n\n%s\n（%s）' % (path, reason), owner)
             return
+        mode = mode_getter() if mode_getter is not None else DEFAULT_MODE
         if on_open is not None:
-            on_open(path)          # 交给宿主窗口决定怎么切（比如先关掉自己再开游戏窗口）
+            # 交给宿主窗口决定怎么切（比如先关掉自己再开游戏窗口）
+            on_open(path, mode)
         else:
-            open_in_game(owner, path)
+            open_in_game(owner, path, mode)
 
     for control in clickable:
         control.Click += open_card
@@ -586,9 +595,10 @@ def _dispose_card(card):
 
 
 def build_gallery(owner=None, on_back=None, on_open=None):
-    """构造剧本列表面板：顶部条（返回 / 标题 / 刷新）+ 竖排卡片列表。
+    """构造剧本列表面板：顶部条（返回 / 标题 / 刷新）+ 模式选择条 + 竖排卡片列表。
 
-    on_open(path)：点卡片时调用；不传就默认打开游戏窗口。
+    on_open(path, mode)：点卡片时调用，mode 是上面选中的游戏模式；
+    不传就默认打开游戏窗口。
     """
     panel = Panel()
     panel.Dock = DockStyle.Fill
@@ -602,6 +612,57 @@ def build_gallery(owner=None, on_back=None, on_open=None):
     listings.BackColor = DARK_BACK
     listings.Padding = Padding(10)
     panel.Controls.Add(listings)
+
+    state = {'mode': DEFAULT_MODE}
+
+    # 模式选择条：先加在顶栏之前，停靠后它会落在顶栏下面、卡片列表上面
+    mode_bar = Panel()
+    mode_bar.Dock = DockStyle.Top
+    mode_bar.Height = 40
+    mode_bar.BackColor = MODEBAR_BACK
+
+    mode_label = Label()
+    mode_label.Text = '游戏模式：'
+    mode_label.AutoSize = True
+    mode_label.Font = Font('Microsoft YaHei UI', 9, FontStyle.Bold)
+    mode_label.ForeColor = TEXT_COLOR
+    mode_label.BackColor = Color.Transparent
+    mode_label.Location = Point(14, 11)
+    mode_bar.Controls.Add(mode_label)
+
+    def make_mode_radio(mode, x):
+        radio = RadioButton()
+        radio.Text = mode
+        radio.AutoSize = True
+        radio.Font = Font('Microsoft YaHei UI', 9)
+        radio.ForeColor = TEXT_COLOR
+        radio.BackColor = MODEBAR_BACK
+        radio.Checked = (mode == DEFAULT_MODE)
+        radio.Location = Point(x, 11)
+
+        def on_checked(sender, event):
+            if sender.Checked:
+                state['mode'] = mode
+
+        radio.CheckedChanged += on_checked
+        return radio
+
+    radio_x = 88
+    for mode in GAME_MODES:
+        radio = make_mode_radio(mode, radio_x)
+        mode_bar.Controls.Add(radio)
+        radio_x += 82          # PVE / PVP / HOTSEAT 依次排开（HOTSEAT 字长，位置留够）
+
+    mode_hint = Label()
+    mode_hint.Text = MODE_HINT
+    mode_hint.AutoSize = True
+    mode_hint.Font = Font('Microsoft YaHei UI', 8)
+    mode_hint.ForeColor = FAINT_TEXT
+    mode_hint.BackColor = Color.Transparent
+    mode_hint.Location = Point(radio_x + 10, 13)
+    mode_bar.Controls.Add(mode_hint)
+
+    panel.Controls.Add(mode_bar)
 
     top = Panel()
     top.Dock = DockStyle.Top
@@ -652,7 +713,8 @@ def build_gallery(owner=None, on_back=None, on_open=None):
         entries = find_scenarios()
         if entries:
             for path, mtime, size in entries:
-                listings.Controls.Add(make_card(owner, path, mtime, size, on_open))
+                listings.Controls.Add(make_card(owner, path, mtime, size, on_open,
+                                                mode_getter=lambda: state['mode']))
         else:
             listings.Controls.Add(make_empty_hint(owner))
         count_label.Text = '找到 %d 个剧本' % len(entries)
@@ -690,15 +752,15 @@ def load_local_module(name):
     return module
 
 
-def open_in_game(owner, path):
-    """点剧本卡片：按这个剧本的初设打开游戏窗口。"""
+def open_in_game(owner, path, mode=DEFAULT_MODE):
+    """点剧本卡片：按这个剧本的初设打开游戏窗口（mode 只是带过去显示，暂不影响玩法）。"""
     try:
         module = load_local_module(GAME_MODULE)
     except Exception as exc:
         show_error('打开游戏窗口失败：\n\n%s: %s' % (type(exc).__name__, exc), owner)
         return False
     try:
-        return module.open_game_window(owner, path)
+        return module.open_game_window(owner, path, mode)
     except Exception as exc:
         show_error('游戏窗口出错：\n\n%s: %s' % (type(exc).__name__, exc), owner)
         return False

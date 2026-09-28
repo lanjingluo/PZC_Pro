@@ -10,9 +10,11 @@
   按钮「新建 / 修改单位类型...」可新建或修改类型，保存写回该 .data 文件。
   类型数据里没有"数量"——数量属于具体单位；
 - 军队编制模式（.oob，具体单位）：左侧是军 → 师 → 旅 → 团 → 营 → 连 的编制树，
-  右侧显示选中节点的级别、引用的单位类型、下级数、合计数量、编制路径、本级数量条，
+  右侧显示选中节点的级别、阵营、引用的单位类型、下级数、合计数量、编制路径、本级数量条，
   以及**该单位类型从 .data 里调出来的能力数值条**；
-  按钮「新增下级...」「修改节点...」「删除节点」直接改这棵树，保存写回该 .oob 文件；
+  按钮「新增下级...」「修改节点...」「删除节点」直接改这棵树（节点可单独填阵营，
+  留空就继承上级），「军队属性...」改军队名与军队阵营（文件顶层那两项），
+  保存都写回该 .oob 文件；
   新增/修改节点时，选完"单位类型"会立刻显示这个类型的能力，数量填的是这支具体部队的数量；
 - 两个模式都用「打开文件...」按钮切换（会重新问文件类型），双击表格行/树节点可直接编辑；
 - 底部一行状态栏，显示当前文件路径与类型数量或节点数量；
@@ -33,7 +35,7 @@ except ImportError:
 
     ctypes.windll.user32.MessageBoxW(
         0,
-        '缺少依赖 pythonnet，程序无法启动。\n\n请在命令行执行：\n    python -m pip install pythonnet',
+        '缺少依赖 pythonnet，程序无法启动。\n\n请先运行项目根目录的 setup_env.bat 创建虚拟环境并安装依赖，\n或手动执行：\n    python -m pip install -r requirements.txt',
         '单位编辑器 - 缺少依赖',
         0x10,
     )
@@ -165,6 +167,15 @@ def set_bar(bar, value, top):
     ratio = 0.0 if top <= 0 else max(0.0, min(1.0, float(value) / float(top)))
     bar.Width = int(round(BAR_TRACK_WIDTH * ratio))
     return bar.Width
+
+
+def faction_choices():
+    """阵营下拉框的可选值：军队与各节点出现过的阵营 + 几个常见值。"""
+    values = list(oob.factions())
+    for name in ('德军', '苏军', '美军', '英军', '日军'):
+        if name not in values:
+            values.append(name)
+    return values
 
 
 def number_value(box):
@@ -513,8 +524,13 @@ class OobBrowser:
                 bar.Width = 0
             return None
         self.title.Text = str(node.name)
-        self.info.Text = '级别：%s\n单位类型：%s\n下级：%d 个\n合计数量：%d' % (
-            node.level, node.type or '（无）', len(node.children), node.total_step())
+        if node.faction:
+            faction_text = node.faction
+        else:
+            faction_text = '（继承 %s）' % (node.effective_faction() or '未定')
+        self.info.Text = '级别：%s\n阵营：%s\n单位类型：%s\n下级：%d 个 · 合计数量：%d' % (
+            node.level, faction_text, node.type or '（无）',
+            len(node.children), node.total_step())
         self.path_label.Text = '编制路径：\n' + ' → '.join(node.path())
         value = int(node.step or 0)
         self.step_value.Text = str(value)
@@ -533,6 +549,8 @@ class OobBrowser:
         text = '%s（%s）' % (node.name, node.level)
         if node.type:
             text += ' · ' + node.type
+        if node.faction and node.faction != oob.FACTION:
+            text += ' · ' + node.faction          # 与军队阵营不同时才标出来
         item = TreeNode(text)
         item.Tag = node
         for child in node.children:
@@ -604,12 +622,14 @@ class OobNodeDialog:
         form.MaximizeBox = False
         form.MinimizeBox = False
         form.ShowInTaskbar = False
-        form.ClientSize = Size(440, 288)
+        form.ClientSize = Size(440, 322)
 
         y = 18
         self.name_box = self._add_text(form, '番号', y)
         y += ROW_H
         self.level_combo = self._add_combo(form, '级别', y, oob.LEVELS)
+        y += ROW_H
+        self.faction_combo = self._add_text_combo(form, '阵营', y, faction_choices())
         y += ROW_H
         self.type_combo = self._add_combo(form, '单位类型', y, [NO_TYPE] + database.names())
         y += ROW_H
@@ -681,6 +701,12 @@ class OobNodeDialog:
         form.Controls.Add(combo)
         return combo
 
+    def _add_text_combo(self, form, text, y, values):
+        """可输入的下拉框（既能从列表里选，也能自己打一个）。"""
+        combo = self._add_combo(form, text, y, values)
+        combo.DropDownStyle = ComboBoxStyle.DropDown
+        return combo
+
     def _select(self, combo, value):
         value = '' if value is None else str(value)
         items = [str(item) for item in combo.Items]
@@ -701,6 +727,7 @@ class OobNodeDialog:
         if node is not None:
             self.name_box.Text = node.name
             self._select(self.level_combo, node.level)
+            self.faction_combo.Text = node.faction or node.effective_faction()
             self._select(self.type_combo, node.type or NO_TYPE)
             self.step_box.Value = Decimal(max(0, min(20, int(node.step))))
             self.note_box.Text = node.note
@@ -708,6 +735,10 @@ class OobNodeDialog:
             self.name_box.Text = ''
             level = self.parent.deeper_level() if self.parent is not None else '营'
             self._select(self.level_combo, level)
+            if self.parent is not None:
+                self.faction_combo.Text = self.parent.effective_faction()
+            else:
+                self.faction_combo.Text = oob.FACTION
             self._select(self.type_combo, NO_TYPE)
             self.step_box.Value = Decimal(1)
             self.note_box.Text = ''
@@ -738,6 +769,7 @@ class OobNodeDialog:
         return {
             'name': str(self.name_box.Text or '').strip(),
             'level': str(self.level_combo.SelectedItem or '营'),
+            'faction': str(self.faction_combo.Text or '').strip(),
             'type': type_name,
             'step': number_value(self.step_box),
             'note': str(self.note_box.Text or ''),
@@ -753,6 +785,7 @@ class OobNodeDialog:
         if self.node is not None:
             self.node.name = data['name']
             self.node.level = data['level']
+            self.node.faction = data['faction']
             self.node.type = data['type']
             self.node.step = data['step']
             self.node.note = data['note']
@@ -760,7 +793,7 @@ class OobNodeDialog:
         else:
             node = oob.OobNode(name=data['name'], level=data['level'],
                                type_name=data['type'], step=data['step'],
-                               note=data['note'])
+                               note=data['note'], faction=data['faction'])
             if self.parent is not None:
                 self.parent.add_child(node)
             self.saved_node = node
@@ -770,6 +803,95 @@ class OobNodeDialog:
             MessageBox.Show(self.form, '保存失败：%s' % ex, OOB_TITLE,
                             MessageBoxButtons.OK, MessageBoxIcon.Error)
             return
+        self.form.DialogResult = DialogResult.OK
+
+    def show(self):
+        """显示对话框，返回 DialogResult。"""
+        return self.form.ShowDialog(self.owner) if self.owner is not None else self.form.ShowDialog()
+
+
+class ArmyDialog:
+    """修改军队属性：军队名 + 军队阵营（.oob 文件顶层的那两项）。"""
+
+    def __init__(self, owner=None):
+        self.owner = owner
+        self.saved = None
+
+        self.form = Form()
+        form = self.form
+        form.Text = '军队属性'
+        form.FormBorderStyle = FormBorderStyle.FixedDialog
+        form.StartPosition = FormStartPosition.CenterParent
+        form.MaximizeBox = False
+        form.MinimizeBox = False
+        form.ShowInTaskbar = False
+        form.ClientSize = Size(440, 176)
+
+        y = 20
+        self._add_label(form, '军队名', y)
+        self.name_box = TextBox()
+        self.name_box.Location = Point(FIELD_X, y)
+        self.name_box.Size = Size(FIELD_W, 24)
+        self.name_box.Text = oob.ARMY
+        form.Controls.Add(self.name_box)
+        y += ROW_H
+
+        self._add_label(form, '阵营', y)
+        self.faction_combo = ComboBox()
+        self.faction_combo.Location = Point(FIELD_X, y)
+        self.faction_combo.Size = Size(FIELD_W, 24)
+        self.faction_combo.DropDownStyle = ComboBoxStyle.DropDown
+        for value in faction_choices():
+            self.faction_combo.Items.Add(value)
+        self.faction_combo.Text = oob.FACTION
+        form.Controls.Add(self.faction_combo)
+        y += ROW_H
+
+        save = Button()
+        save.Text = '保存'
+        save.Size = Size(90, 28)
+        save.Location = Point(FIELD_X, y + 10)
+        save.Click += self.save
+        form.Controls.Add(save)
+
+        cancel = Button()
+        cancel.Text = '取消'
+        cancel.Size = Size(90, 28)
+        cancel.Location = Point(FIELD_X + 100, y + 10)
+        cancel.DialogResult = DialogResult.Cancel
+        form.Controls.Add(cancel)
+        form.AcceptButton = save
+        form.CancelButton = cancel
+
+    def _add_label(self, form, text, y):
+        label = Label()
+        label.Text = text
+        label.Location = Point(LABEL_X, y + 4)
+        label.Size = Size(95, 20)
+        form.Controls.Add(label)
+        return label
+
+    def collect(self):
+        return {
+            'name': str(self.name_box.Text or '').strip(),
+            'faction': str(self.faction_combo.Text or '').strip(),
+        }
+
+    def save(self, sender, args):
+        """保存按钮：改军队名 / 阵营并写回 .oob 文件。"""
+        data = self.collect()
+        if not data['name']:
+            MessageBox.Show(self.form, '请先填写军队名。', OOB_TITLE,
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            return
+        try:
+            oob.set_army(name=data['name'], faction=data['faction'])
+            oob.save_file()
+        except Exception as ex:
+            MessageBox.Show(self.form, '保存失败：%s' % ex, OOB_TITLE,
+                            MessageBoxButtons.OK, MessageBoxIcon.Error)
+            return
+        self.saved = data
         self.form.DialogResult = DialogResult.OK
 
     def show(self):
@@ -851,7 +973,10 @@ def data_status_detail():
 def oob_status_detail():
     """军队编制模式的状态栏内容。"""
     count = oob.root().count() if oob.root() is not None else 0
-    return '编制文件：%s（共 %d 个节点）' % (oob.current_file(), count)
+    army = oob.ARMY or '（未命名军队）'
+    faction = oob.FACTION or '阵营未定'
+    return '编制文件：%s（%s · %s，共 %d 个节点）' % (
+        oob.current_file(), army, faction, count)
 
 
 def refresh_status_detail(status, message, detail):
@@ -927,6 +1052,8 @@ class UnitsEditor:
                                                  lambda s, a: self.edit_node())
         self.delete_node_button = self._add_button(toolbar, '删除节点', 346, 100,
                                                    lambda s, a: self.delete_node())
+        self.army_button = self._add_button(toolbar, '军队属性...', 454, 100,
+                                            lambda s, a: self.edit_army())
 
         # 双击：表格里的一行 = 修改类型；树上的一个节点 = 修改节点
         self.browser.table.DoubleClick += lambda sender, args: open_type_dialog(
@@ -952,7 +1079,8 @@ class UnitsEditor:
         self.type_button.Visible = data_mode
         self.tree_browser.tree.Visible = not data_mode
         self.tree_browser.panel.Visible = not data_mode
-        for button in (self.add_node_button, self.edit_node_button, self.delete_node_button):
+        for button in (self.add_node_button, self.edit_node_button,
+                       self.delete_node_button, self.army_button):
             button.Visible = not data_mode
         return kind
 
@@ -1037,6 +1165,16 @@ class UnitsEditor:
         return path
 
     # ---------- 编制节点的增 / 改 / 删 ----------
+    def edit_army(self, sender=None, args=None):
+        """改军队名与军队阵营（写在 .oob 文件顶层）。"""
+        dialog = ArmyDialog(self.form)
+        if dialog.show() != DialogResult.OK or not dialog.saved:
+            return None
+        self.tree_browser.reload()
+        refresh_status_detail(self.status, '已修改军队：%s（%s）' % (
+            dialog.saved['name'], dialog.saved['faction'] or '阵营未定'), oob_status_detail())
+        return dialog.saved
+
     def add_node(self, sender=None, args=None):
         """给选中的节点加一个下级。"""
         parent = self.tree_browser.selected_node()

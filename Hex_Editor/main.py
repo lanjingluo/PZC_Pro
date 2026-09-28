@@ -14,7 +14,7 @@ except ImportError:
     import ctypes
     ctypes.windll.user32.MessageBoxW(
         0,
-        '缺少依赖 pythonnet，程序无法启动。\n\n请在命令行执行：\n    python -m pip install pythonnet',
+        '缺少依赖 pythonnet，程序无法启动。\n\n请先运行项目根目录的 setup_env.bat 创建虚拟环境并安装依赖，\n或手动执行：\n    python -m pip install -r requirements.txt',
         'Hex Editor - 缺少依赖',
         0x10,
     )

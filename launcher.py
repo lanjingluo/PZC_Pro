@@ -9,6 +9,9 @@
 这些文件都不打进 exe，所以改游戏代码后不用重新打包，只有改本文件（启动器自己的窗口、
 按钮）才需要重新打包。
 
+“载入存档”从项目 saves 目录挑一个 .hotseat 热座存档，用游戏窗口接着打
+（.hotseat 由 game_window.py 保存和读取，这里只管选文件）。
+
 左侧栏的两个入口用独立的 pythonw 进程打开对应的 .py（和 run_*.bat 一样）：
 Hex_Editor / setup 都需要自己的 STA 线程和消息循环，塞进启动器进程里会互相阻塞。
 """
@@ -25,7 +28,7 @@ except ImportError:
 
     ctypes.windll.user32.MessageBoxW(
         0,
-        '缺少依赖 pythonnet，程序无法启动。\n\n请在命令行执行：\n    python -m pip install pythonnet',
+        '缺少依赖 pythonnet，程序无法启动。\n\n请先在项目根目录运行 setup_env.bat 创建虚拟环境并安装依赖，\n或手动执行：\n    python -m pip install -r requirements.txt',
         '游戏启动器 - 缺少依赖',
         0x10,
     )
@@ -38,6 +41,7 @@ from System.Drawing import Color, Font, FontStyle, Point, Size
 from System.Windows.Forms import (
     Application,
     Button,
+    DialogResult,
     DockStyle,
     FlatStyle,
     Form,
@@ -46,6 +50,7 @@ from System.Windows.Forms import (
     MessageBox,
     MessageBoxButtons,
     MessageBoxIcon,
+    OpenFileDialog,
     Panel,
 )
 
@@ -70,6 +75,14 @@ TOOL_ENTRIES = (
 
 NEW_GAME_MODULE = 'new_game'
 NEW_GAME_FUNCTION = 'open_new_game_window'
+
+# “载入存档”：从 saves 目录挑一个 .hotseat（热座存档），交给游戏窗口接着打；
+# 游戏窗口本身按路径从磁盘加载，所以这里只负责选文件，存档格式由它自己解释。
+GAME_MODULE = 'game_window'
+GAME_OPEN_FUNCTION = 'open_game_window'
+SAVES_DIR_NAME = 'saves'
+SAVE_FILE_FILTER = ('热座存档 (*.hotseat)|*.hotseat|'
+                    '剧本 (*.scenario)|*.scenario|所有文件 (*.*)|*.*')
 
 # 背景图的读取、缩放、防抖都在 ui_background.py 里（new_game.py 也用它）
 BACKGROUND_MODULE = 'ui_background'
@@ -237,14 +250,33 @@ def on_new_game(owner):
 
 
 def on_load_save(owner):
-    """“载入存档”：暂时是占位按钮。"""
-    MessageBox.Show(
-        owner,
-        '载入存档还没有实现。\n\n下一步可以在这里放存档列表，读取 saves 目录里的 .hex 文件。',
-        '载入存档',
-        MessageBoxButtons.OK,
-        MessageBoxIcon.Information,
-    )
+    """“载入存档”：从 saves 目录挑一个 .hotseat，用游戏窗口接着打。"""
+    folder = os.path.join(project_dir(), SAVES_DIR_NAME)
+    dlg = OpenFileDialog()
+    dlg.Title = '载入存档'
+    dlg.Filter = SAVE_FILE_FILTER
+    if os.path.isdir(folder):
+        dlg.InitialDirectory = folder
+    if dlg.ShowDialog(owner) != DialogResult.OK:
+        return
+
+    try:
+        module = load_local_module(GAME_MODULE)
+    except Exception as exc:
+        show_error('打开 %s.py 失败：\n\n%s: %s' % (GAME_MODULE, type(exc).__name__, exc))
+        return
+
+    opener = getattr(module, GAME_OPEN_FUNCTION, None)
+    if opener is None:
+        show_error('%s.py 里没有找到 %s() 函数。' % (GAME_MODULE, GAME_OPEN_FUNCTION))
+        return
+
+    try:
+        # owner 传 None：游戏窗口独立开着，关掉它还能回到启动器继续载入别的存档；
+        # 存档里记着自己的模式与回合，所以 mode 传 None。
+        opener(None, dlg.FileName, None)
+    except Exception as exc:
+        show_error('载入存档出错：\n\n%s: %s' % (type(exc).__name__, exc))
 
 
 def make_button(text, handler, size=None):

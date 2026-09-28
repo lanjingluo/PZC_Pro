@@ -3,6 +3,14 @@
 - open_game_window(owner, scenario_path)：打开游戏窗口（剧本列表点卡片调用）
 - main()：单独运行本文件，直接看 setupsaves 里的第一个剧本（只是开发时方便）
 
+热座（同一台机器轮流操作）：
+- 双方阵营按剧本里出现的 faction 轮流行动，顶栏显示第几回合、轮到哪一方；
+  点“下一回合”把行动权交给对方，两方都走完一圈就进入下一回合。
+- 不是当前行动方的单位画成半透明（双方都有单位时才这样区分）。
+- 任何时间都能保存：顶栏“保存”/ Ctrl+S 直接写 saves/<剧本名>.hotseat，
+  “另存为”/ Ctrl+Shift+S 换文件名。存档内容是场上地图、单位与回合状态，
+  .hotseat 也是本文件能直接打开的输入（读回来接着打）。
+
 操作：滚轮缩放（以光标为中心）、WASD 或方向键平移、按住左键拖动平移、
 单击单位选中它（同一格多个单位就点哪个选哪个），左侧栏显示选中单位的具体情况。
 
@@ -14,6 +22,7 @@ import json
 import math
 import os
 import sys
+import time
 
 import clr
 
@@ -43,6 +52,7 @@ from System.Windows.Forms import (
     Control,
     Cursor,
     Cursors,
+    DialogResult,
     DockStyle,
     FlatStyle,
     Form,
@@ -57,6 +67,7 @@ from System.Windows.Forms import (
     Panel,
     PictureBox,
     PictureBoxSizeMode,
+    SaveFileDialog,
     SelectionMode,
 )
 from System.Threading import ApartmentState, Thread, ThreadStart
@@ -135,7 +146,24 @@ SELECT_COLOR = Color.FromArgb(255, 210, 60)
 UNIT_SELECT_COLOR = Color.FromArgb(255, 210, 40)
 
 # 独立运行（python game_window.py）时去哪里找剧本；游戏窗口本身不依赖这些路径
-STANDALONE_SEARCH_PATHS = (('setup', 'setupsaves'), ('scenarios',))
+STANDALONE_SEARCH_PATHS = (('setup', 'setupsaves'), ('scenarios'))
+
+# 热座存档（.hotseat）：地图 + 单位 + 回合状态，保存在项目根目录的 saves 文件夹
+# （.scenario 是开新局的初设，.hotseat 是打到一半的存档，两者共用同一套地图/单位字段）
+SCENARIO_TYPE = 'SCENARIO'
+HOTSEAT_TYPE = 'HOTSEAT'
+HOTSEAT_VERSION = 1
+HOTSEAT_SUFFIX = '.hotseat'
+SAVES_DIR_NAME = 'saves'
+HOTSEAT_FILE_FILTER = ('热座存档 (*.hotseat)|*.hotseat|'
+                       '剧本 (*.scenario)|*.scenario|所有文件 (*.*)|*.*')
+
+# 阵营推导：剧本里只写了一个阵营时补一个对手席位，一个都没有时用这组默认名
+DEFAULT_FACTIONS = ('红方', '蓝方')
+UNKNOWN_FACTION = '未编成'
+NOTIONAL_FACTION = '对方'
+# 不是当前行动方的单位画成半透明（0-255）
+INACTIVE_ALPHA = 110
 
 
 def project_dir():
@@ -157,15 +185,152 @@ def to_color(rgb):
 
 
 def read_scenario(path):
-    """读剧本数据（.scenario 就是一份 JSON）。返回 (数据, 失败原因)。"""
+    """读游戏数据：.scenario（开新局的初设）或 .hotseat（热座存档）。
+
+    两种文件都是 JSON，地图 / 格边 / 单位字段完全一样；存档另外带一个 turn 块
+    （第几回合、轮到哪一方）。返回 (数据, 失败原因)。
+    """
     try:
         with open(path, 'r', encoding='utf-8') as handle:
             data = json.load(handle)
     except (OSError, ValueError) as exc:
         return None, '%s: %s' % (type(exc).__name__, exc)
-    if not isinstance(data, dict) or data.get('type') != 'SCENARIO':
-        return None, '不是剧本文件（type 字段应为 SCENARIO）'
+    if not isinstance(data, dict):
+        return None, '不是剧本文件（type 字段应为 SCENARIO / HOTSEAT）'
+    kind = str(data.get('type') or '')
+    if kind not in (SCENARIO_TYPE, HOTSEAT_TYPE):
+        return None, '不是剧本文件（type 字段应为 SCENARIO / HOTSEAT）'
+    if kind == HOTSEAT_TYPE and not isinstance(data.get('map'), dict):
+        return None, '存档里没有地图数据（缺少 map）'
     return data, None
+
+
+def project_saves_dir():
+    """存档目录（项目根目录下的 saves），不存在就创建；创建失败返回 None。"""
+    path = os.path.join(project_dir(), SAVES_DIR_NAME)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        return None
+    return path
+
+
+def faction_key(value):
+    """阵营名归一（比较用）：去掉首尾空白。"""
+    return str(value or '').strip()
+
+
+class HotseatGame:
+    """热座回合状态：双方阵营轮流行动，一方打完点“下一回合”换手。
+
+    factions 是行动顺序。剧本里只写了一个阵营（演示剧本就是只有德军）时补一个
+    “对方”席位，点“下一回合”照样能走完一圈回到第 2 回合。
+    """
+
+    def __init__(self, units=None, turn=None, mode=None):
+        turn = turn if isinstance(turn, dict) else {}
+        self.units = list(units or [])
+        self.mode = str(mode or turn.get('mode') or '')
+        self.source_scenario = str(turn.get('source_scenario') or '')
+        self.path = None                     # 当前存档路径（另存为后更新）
+        self.factions = self._build_factions(turn.get('factions'))
+        self.number = max(1, int(turn.get('number') or 1))
+        self.index = self._build_index(turn)
+
+    def _build_factions(self, saved):
+        """行动顺序：先信存档里记的，再按剧本里出现的阵营补齐。"""
+        names = []
+        for name in (saved or []):
+            text = faction_key(name)
+            if text and text not in names:
+                names.append(text)
+        for unit in self.units:
+            text = faction_key(unit.get('faction')) or UNKNOWN_FACTION
+            if text not in names:
+                names.append(text)
+        if len(names) == 1:
+            names.append(NOTIONAL_FACTION)
+        elif not names:
+            names = list(DEFAULT_FACTIONS)
+        return names
+
+    def _build_index(self, turn):
+        """轮到第几个阵营：优先按存档里的下标，其次按阵营名找。"""
+        try:
+            index = int(turn.get('index'))
+        except (TypeError, ValueError):
+            index = -1
+        name = faction_key(turn.get('faction'))
+        if not 0 <= index < len(self.factions) and name in self.factions:
+            index = self.factions.index(name)
+        if not 0 <= index < len(self.factions):
+            index = 0
+        return index
+
+    @property
+    def current(self):
+        """轮到哪一方。"""
+        return self.factions[self.index]
+
+    def advance(self):
+        """结束当前方的回合：轮到下一方；转完一圈就进入下一回合。"""
+        self.index += 1
+        if self.index >= len(self.factions):
+            self.index = 0
+            self.number += 1
+        return self.current
+
+    def unit_count(self, faction=None):
+        """某一方还有多少单位（默认当前方）。"""
+        name = self.current if faction is None else faction_key(faction)
+        return sum(1 for unit in self.units
+                   if faction_key(unit.get('faction')) == name)
+
+    def to_dict(self):
+        return {
+            'number': self.number,
+            'index': self.index,
+            'faction': self.current,
+            'factions': list(self.factions),
+            'mode': self.mode,
+            'source_scenario': self.source_scenario,
+        }
+
+
+def hotseat_payload(view, game, timestamp=None):
+    """把场上地图、单位与回合状态打包成 .hotseat 内容（纯数据）。"""
+    data = view.data if isinstance(view.data, dict) else {}
+    return {
+        'v': HOTSEAT_VERSION,
+        'type': HOTSEAT_TYPE,
+        'saved_at': timestamp or time.strftime('%Y-%m-%d %H:%M:%S'),
+        'map': dict(view.map_info),
+        'cells': dict(data.get('cells') or {}),
+        'edges': dict(data.get('edges') or {}),
+        'oob': data.get('oob'),
+        'units': [dict(unit) for unit in view.units],
+        'turn': game.to_dict(),
+    }
+
+
+def save_hotseat(path, view, game):
+    """写 .hotseat 存档；返回 (是否成功, 失败原因)。"""
+    try:
+        payload = hotseat_payload(view, game)
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    except (OSError, ValueError) as exc:
+        return False, '%s: %s' % (type(exc).__name__, exc)
+    return True, None
+
+
+def hotseat_file_name(view, game):
+    """快速保存 / 另存为对话框里的默认文件名。"""
+    source = game.source_scenario or view.path or ''
+    base = os.path.splitext(os.path.basename(source))[0].strip()
+    if not base:
+        base = (view.name or '').strip() or '未命名'
+    return base + HOTSEAT_SUFFIX
 
 
 def parse_cell_key(key):
@@ -481,6 +646,7 @@ class GameView:
         self.name = ''
         self.map_width = 0
         self.map_height = 0
+        self.map_info = {}
         self.margins = {}
         self.cell = 0.0
         self.centers = {}
@@ -494,6 +660,8 @@ class GameView:
         self.selected_cell = None
         self.selected_units = []
         self.selected_index = 0
+        self.active_faction = None                # 当前行动方（对方单位画半透明）
+        self.dim_inactive = False                 # 双方都有单位时才需要区分
         self.mark_font = Font('Microsoft YaHei UI', 8, FontStyle.Bold)
         self.name_font = Font('Microsoft YaHei UI', 7)
         self._tile = None
@@ -517,6 +685,7 @@ class GameView:
 
         map_info = data.get('map') or {}
         cols = int(map_info.get('cols') or 0)
+        self.map_info = dict(map_info)
         self.map_width = int(map_info.get('width') or 0)
         self.map_height = int(map_info.get('height') or 0)
         self.margins = map_info.get('margins') or {}
@@ -543,6 +712,7 @@ class GameView:
 
         self.units = list(data.get('units') or [])
         self.stacks = group_units(self.units)
+        self.active_faction = None
         self.clear_selection()
         self._tile = None
         self._tile_key = None
@@ -824,6 +994,7 @@ class GameView:
             pen.Dispose()
 
     def draw_units(self, graphics, cell_px):
+        active = faction_key(self.active_faction) if self.dim_inactive else ''
         for (q, r), records in self.stacks.items():
             center = self.centers.get((q, r))
             if center is None:
@@ -832,9 +1003,11 @@ class GameView:
             selected_stack = self.selected_cell == (q, r)
             slots = self.stack_slots(cx, cy, cell_px, len(records))
             for index, (bx, by, bw, bh) in enumerate(slots):
-                self.draw_unit_symbol(graphics, bx, by, bw, bh, records[index],
+                unit = records[index]
+                self.draw_unit_symbol(graphics, bx, by, bw, bh, unit,
                                       number=(index + 1) if len(records) > 1 else 0,
-                                      selected=selected_stack and index == self.selected_index)
+                                      selected=selected_stack and index == self.selected_index,
+                                      dim=bool(active) and faction_key(unit.get('faction')) != active)
 
     def stack_slots(self, cx, cy, cell_px, count):
         """一格内多个军标的排布（列数取 sqrt(n) 向上取整），返回 [(中心x, 中心y, 宽, 高)]。"""
@@ -857,12 +1030,18 @@ class GameView:
         return slots
 
     def draw_unit_symbol(self, graphics, cx, cy, width, height, unit,
-                         number=0, selected=False):
-        """一个北约军标：阵营色底框（敌军画菱形）+ 兵种符号 + 上方级别标记；底下不写番号。"""
+                         number=0, selected=False, dim=False):
+        """一个北约军标：阵营色底框（敌军画菱形）+ 兵种符号 + 上方级别标记；底下不写番号。
+
+        dim=True（不是当前行动方的单位）时整体画成半透明，方便热座时一眼看清轮到谁。
+        """
         from System import Array
         rgb = faction_color(unit.get('faction'))
         color = to_color(rgb)
         ink = ink_color(rgb)
+        if dim:
+            color = Color.FromArgb(INACTIVE_ALPHA, rgb[0], rgb[1], rgb[2])
+            ink = Color.FromArgb(INACTIVE_ALPHA, ink.R, ink.G, ink.B)
         shape = affiliation_frame(unit)
         corners = frame_points(shape, cx, cy, width, height)
         points = Array[PointF]([PointF(x, y) for x, y in corners])
@@ -929,8 +1108,11 @@ def _bar_button(text, width=96):
     return button
 
 
-def build_game_window(owner=None, scenario_path=None):
-    """创建游戏窗口：顶栏 + 左侧单位栏 + 地图画布 + 状态栏。"""
+def build_game_window(owner=None, scenario_path=None, mode=None):
+    """创建游戏窗口：顶栏 + 左侧单位栏 + 地图画布 + 状态栏。
+
+    mode 是剧本列表上选的游戏模式（PVE / PVP / HOTSEAT）：现在只在状态栏里显示，玩法还没接。
+    """
     data = None
     reason = None
     if scenario_path:
@@ -1007,12 +1189,26 @@ def build_game_window(owner=None, scenario_path=None):
     form.Controls.Add(top)
 
     title = Label()
-    title.AutoSize = True
+    title.AutoSize = False
+    title.Size = Size(196, 20)
+    title.AutoEllipsis = True
+    title.TextAlign = ContentAlignment.MiddleLeft
     title.ForeColor = TEXT_COLOR
     title.BackColor = Color.Transparent
-    title.Font = Font('Microsoft YaHei UI', 12, FontStyle.Bold)
-    title.Location = Point(14, 15)
+    title.Font = Font('Microsoft YaHei UI', 11, FontStyle.Bold)
+    title.Location = Point(14, 5)
     top.Controls.Add(title)
+
+    # 顶栏第二行：现在是第几回合、轮到哪一方（颜色跟着阵营走）
+    turn_label = Label()
+    turn_label.AutoSize = False
+    turn_label.Size = Size(196, 16)
+    turn_label.AutoEllipsis = True
+    turn_label.ForeColor = SELECT_COLOR
+    turn_label.BackColor = Color.Transparent
+    turn_label.Font = Font('Microsoft YaHei UI', 9, FontStyle.Bold)
+    turn_label.Location = Point(14, 27)
+    top.Controls.Add(turn_label)
 
     zoom_label = Label()
     zoom_label.AutoSize = True
@@ -1025,17 +1221,43 @@ def build_game_window(owner=None, scenario_path=None):
                     on_select=lambda cell, units, index: refresh_selection(cell, units, index),
                     on_zoom=lambda zoom: update_zoom(zoom))
 
+    # 游戏状态：回合状态与当前存档路径（载入后才有值）
+    state = {'game': None, 'save_path': None}
+
     def update_zoom(zoom):
         zoom_label.Text = '%d%%' % round(zoom * 100)
-        zoom_label.Location = Point(max(240, top.ClientSize.Width - zoom_label.Width - 150), 20)
+        layout_top()
+
+    def turn_text():
+        """状态栏 / 顶栏里的回合文字：第几回合 · 轮到哪一方。"""
+        game = state['game']
+        if game is None:
+            return ''
+        return '第 %d 回合 · %s' % (game.number, game.current)
+
+    def update_turn_label():
+        game = state['game']
+        if game is None:
+            turn_label.Text = ''
+            return
+        turn_label.Text = '第%d回合 · %s行动 · %d单位' % (
+            game.number, game.current, game.unit_count())
+        turn_label.ForeColor = to_color(faction_color(game.current))
 
     def scenario_line():
         map_info = (data or {}).get('map') or {}
         paper = str(map_info.get('paper') or '?').upper()
-        return ('%s · %s · %d 列 · 地形 %d · 格边 %d · 单位 %d'
-                % (view.name, '自定义' if paper == 'CUSTOM' else paper,
-                   int(map_info.get('cols') or 0), len(view.terrain_cells),
-                   len(view.edge_items), len(view.units)))
+        game = state['game']
+        parts = []
+        if game is not None:
+            parts.append(turn_text() + ' 行动')
+            if game.mode:
+                parts.append('模式 %s' % game.mode)
+        parts.append('%s · %s · %d 列 · 地形 %d · 格边 %d · 单位 %d'
+                     % (view.name, '自定义' if paper == 'CUSTOM' else paper,
+                        int(map_info.get('cols') or 0), len(view.terrain_cells),
+                        len(view.edge_items), len(view.units)))
+        return '　|　'.join(parts)
 
     syncing = {'flag': False}
 
@@ -1057,11 +1279,19 @@ def build_game_window(owner=None, scenario_path=None):
             syncing['flag'] = False
 
         if not cell:
-            details.Text = ('点击地图上的单位来选中它。\n\n'
+            game = state['game']
+            head = ''
+            if game is not None:
+                head = ('当前：第 %d 回合 · %s 行动（该方单位 %d 个）\n'
+                        '点“下一回合”换对方行动；对方单位在地图上显示为半透明。\n\n'
+                        % (game.number, game.current, game.unit_count()))
+            details.Text = (head +
+                            '点击地图上的单位来选中它。\n\n'
                             '滚轮缩放（以光标为中心）\n'
                             'WASD / 方向键平移\n'
                             'Shift+滚轮左右平移\n'
-                            '按住左键拖动平移')
+                            '按住左键拖动平移\n'
+                            'Ctrl+S 保存存档　Ctrl+Shift+S 另存为')
             status.Text = scenario_line() + '　|　点击地图上的单位'
             return
 
@@ -1092,6 +1322,11 @@ def build_game_window(owner=None, scenario_path=None):
 
     def on_key_down(sender, event):
         key = event.KeyCode
+        modifiers = Control.ModifierKeys
+        if (modifiers & Keys.Control) == Keys.Control and key == Keys.S:
+            save_game(as_new=(modifiers & Keys.Shift) == Keys.Shift)
+            event.Handled = True
+            return
         if key in (Keys.W, Keys.Up):
             view.pan_by(0, PAN_STEP)
         elif key in (Keys.S, Keys.Down):
@@ -1118,18 +1353,113 @@ def build_game_window(owner=None, scenario_path=None):
     zoom_out = _bar_button('缩小', 76)
     zoom_out.Click += lambda sender, event: view.zoom_center(1.0 / ZOOM_STEP)
 
-    x = 220
-    for button in (fit_button, zoom_in, zoom_out):
-        button.Location = Point(x, 10)
+    next_turn_button = _bar_button('下一回合', 96)
+    save_button = _bar_button('保存', 72)
+    save_as_button = _bar_button('另存为', 80)
+    for button in (fit_button, zoom_in, zoom_out,
+                   next_turn_button, save_button, save_as_button):
         top.Controls.Add(button)
-        x += button.Width + 8
+
+    def layout_top():
+        """顶栏摆位：左边是回合控制，右边是视图控制，窗口变窄也不会重叠。"""
+        right = top.ClientSize.Width - 14 - zoom_label.Width
+        zoom_label.Location = Point(max(0, right), 20)
+        x = right - 12
+        for button in reversed((fit_button, zoom_in, zoom_out)):
+            x -= button.Width
+            button.Location = Point(max(0, x), 10)
+            x -= 8
+        x = 220
+        for button in (next_turn_button, save_button, save_as_button):
+            button.Location = Point(x, 10)
+            x += button.Width + 8
+
+    top.Resize += lambda sender, event: layout_top()
+    layout_top()
+
+    def update_game_state():
+        """回合换手后统一刷新：顶栏标签、地图半透明、选中状态与状态栏。"""
+        game = state['game']
+        view.active_faction = game.current if game is not None else None
+        update_turn_label()
+        view.clear_selection()
+        refresh_selection(None, [], 0)
+        view.render()
+
+    def advance_turn():
+        """结束当前方的回合，换对方行动；两方都走完就进入下一回合。"""
+        game = state['game']
+        if game is None:
+            return
+        game.advance()
+        update_game_state()
+        status.Text = '%s　|　轮到 %s 行动（该方单位 %d 个）' % (
+            scenario_line(), game.current, game.unit_count())
+
+    def save_game(as_new=False):
+        """保存热座存档（.hotseat）：场上地图 + 单位 + 回合状态，存到 saves 目录。"""
+        game = state['game']
+        if game is None:
+            show_error('还没有打开剧本，无法保存。', form)
+            return
+        path = None if as_new else state['save_path']
+        if not path:
+            folder = project_saves_dir()
+            if folder is None:
+                show_error('创建存档目录失败：\n\n%s'
+                           % os.path.join(project_dir(), SAVES_DIR_NAME), form)
+                return
+            target = os.path.abspath(os.path.join(folder, hotseat_file_name(view, game)))
+            saved_before = (state['save_path'] and
+                            os.path.abspath(state['save_path']) == target)
+            # 覆盖别人的存档前先让用户自己选文件名，避免误伤
+            if as_new or (os.path.isfile(target) and not saved_before):
+                dlg = SaveFileDialog()
+                dlg.Title = '保存热座存档'
+                dlg.Filter = HOTSEAT_FILE_FILTER
+                dlg.InitialDirectory = folder
+                dlg.FileName = os.path.basename(target)
+                if dlg.ShowDialog(form) != DialogResult.OK:
+                    return
+                path = dlg.FileName
+            else:
+                path = target
+        path = os.path.abspath(path)
+        ok, reason = save_hotseat(path, view, game)
+        if not ok:
+            show_error('保存存档失败：\n\n%s\n（%s）' % (path, reason), form)
+            return
+        state['save_path'] = path
+        game.path = path
+        status.Text = '已保存存档 %s　|　%s 行动　|　模式 %s' % (
+            os.path.basename(path), turn_text(), game.mode or '—')
+
+    next_turn_button.Click += lambda sender, event: advance_turn()
+    save_button.Click += lambda sender, event: save_game()
+    save_as_button.Click += lambda sender, event: save_game(as_new=True)
 
     if data is not None:
         try:
             view.load(data, scenario_path)
+            turn_block = data.get('turn') if isinstance(data.get('turn'), dict) else {}
+            game = HotseatGame(view.units, turn_block, mode or turn_block.get('mode'))
+            if scenario_path:
+                is_hotseat = str(scenario_path).lower().endswith(HOTSEAT_SUFFIX)
+                if is_hotseat:
+                    # 已经打开的存档：保存直接写回它自己
+                    state['save_path'] = os.path.abspath(scenario_path)
+                else:
+                    game.source_scenario = os.path.abspath(scenario_path)
+            state['game'] = game
+            # 两边都有单位时才需要把非行动方画成半透明
+            view.dim_inactive = len({faction_key(unit.get('faction'))
+                                     for unit in view.units}) >= 2
+            view.active_faction = game.current
             title.Text = view.name
             form.Text = '%s - %s' % (view.name, WINDOW_TITLE)
+            update_turn_label()
             refresh_selection(None, [], 0)
+            view.render()
             update_zoom(view.zoom)
         except Exception as exc:
             title.Text = '打开剧本失败'
@@ -1141,12 +1471,15 @@ def build_game_window(owner=None, scenario_path=None):
 
     form.FormClosed += lambda sender, event: view.dispose()
     form.game_view = view                        # 方便以后接游戏功能 / 脚本
+    form.game_state = state                      # 回合状态与存档路径
+    form.advance_turn = advance_turn             # 和顶栏“下一回合”同一个函数
+    form.save_game = save_game                   # 和顶栏“保存 / 另存为”同一个函数
     return form
 
 
-def open_game_window(owner, scenario_path):
-    """打开游戏窗口（剧本列表点卡片调用）。"""
-    form = build_game_window(owner, scenario_path)
+def open_game_window(owner, scenario_path=None, mode=None):
+    """打开游戏窗口（剧本列表点卡片调用；mode 由列表上的模式选择传来）。"""
+    form = build_game_window(owner, scenario_path, mode)
     try:
         if owner is not None:
             form.ShowDialog(owner)
@@ -1168,10 +1501,10 @@ def main():
             if not os.path.isdir(folder):
                 continue
             for name in sorted(os.listdir(folder)):
-                if name.lower().endswith('.scenario'):
+                if name.lower().endswith(('.scenario', HOTSEAT_SUFFIX)):
                     open_game_window(None, os.path.join(folder, name))
                     return
-        show_error('没有找到 .scenario 剧本。')
+        show_error('没有找到 .scenario 剧本 / .hotseat 存档。')
 
     thread = Thread(ThreadStart(run))
     thread.SetApartmentState(ApartmentState.STA)

@@ -21,7 +21,7 @@ except ImportError:
 
     ctypes.windll.user32.MessageBoxW(
         0,
-        '缺少依赖 pythonnet，程序无法启动。\n\n请在命令行执行：\n    python -m pip install pythonnet',
+        '缺少依赖 pythonnet，程序无法启动。\n\n请先在项目根目录运行 setup_env.bat 创建虚拟环境并安装依赖，\n或手动执行：\n    python -m pip install -r requirements.txt',
         '新建游戏 - 缺少依赖',
         0x10,
     )
@@ -164,12 +164,15 @@ def build_new_game_window(owner=None):
         form.Controls.Add(gallery)
         gallery.BringToFront()
 
-    def open_scenario(path):
-        """选好剧本＝进入游戏：先把新建游戏窗口关掉，再打开游戏窗口，不叠着两个窗口。"""
+    def open_scenario(path, mode=None):
+        """选好剧本＝进入游戏：先把新建游戏窗口关掉，再打开游戏窗口，不叠着两个窗口。
+
+        mode 是列表上方选的游戏模式（PVE / PVP / HOTSEAT），现在只是带进游戏窗口显示。
+        """
         form.Hide()
         try:
             module = load_local_module(SCENARIO_MODULE)
-            module.open_in_game(None, path)      # 前一个窗口已经关了，游戏窗口独立打开
+            module.open_in_game(None, path, mode)   # 前一个窗口已经关了，游戏窗口独立打开
         finally:
             form.Close()
 
