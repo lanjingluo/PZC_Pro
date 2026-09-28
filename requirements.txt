@@ -1,0 +1,9 @@
+# 运行依赖（Windows，需要系统自带 .NET Framework 4.x）
+# pythonnet 提供 clr / System.Windows.Forms，所有 GUI 入口都依赖它
+pythonnet==3.1.0
+# 仅 Hex_Editor/imagedetect.py 用得到
+numpy==2.5.3
+pillow==12.3.0
+
+# 打包依赖：build_launcher_exe.py 把 launcher.py 打成 游戏启动器.exe 时才需要
+pyinstaller==6.22.3
