@@ -6,6 +6,10 @@
 热座（同一台机器轮流操作）：
 - 双方阵营按剧本里出现的 faction 轮流行动，顶栏显示第几回合、轮到哪一方；
   点“下一回合”把行动权交给对方，两方都走完一圈就进入下一回合。
+- 移动：点自己方的单位选中它，地图上高亮的格子就是它这回合能走到的地方
+  （数字是消耗的移动力），点一下就走过去。消耗 = 目标格地形消耗 + 跨过那条
+  格边的额外消耗，用 Dijkstra 算最省路线；有敌方单位的格子进不去。
+  移动力来自单位类型数据里的 move，走完就变淡，换回合时恢复。
 - 不是当前行动方的单位画成半透明（双方都有单位时才这样区分）。
 - 任何时间都能保存：顶栏“保存”/ Ctrl+S 直接写 saves/<剧本名>.hotseat，
   “另存为”/ Ctrl+Shift+S 换文件名。存档内容是场上地图、单位与回合状态，
@@ -18,6 +22,7 @@
 不再依赖 setup/ 那套初设工具，也没有任何跳回它们的入口；数据导进来之后，
 游戏界面只跟这份数据打交道。本文件从磁盘加载，改完不用重新打包 exe。
 """
+import heapq
 import json
 import math
 import os
@@ -360,6 +365,180 @@ def edge_cost(name):
     return EDGE_COSTS.get(str(name), 0)
 
 
+# ---------- 移动规则（纯逻辑：只有单位数据与地图数据参与计算） ----------
+
+# 单位类型数据里没写 move 时的兜底移动力
+DEFAULT_MOVE_POINTS = 4
+# 可达格高亮的填充 / 描边透明度
+MOVE_OVERLAY_ALPHA = 60
+MOVE_OVERLAY_EDGE_ALPHA = 170
+# 高亮格上写消耗数字的最小格子像素
+MOVE_COST_MIN_PIXELS = 26.0
+
+# 平顶六边形（奇数列错位）的 6 个邻居偏移，和 Hex_Editor/hexmap.py 用同一张表
+_OFFSETS_EVEN = ((0, -1), (1, -1), (1, 0), (0, 1), (-1, 0), (-1, -1))
+_OFFSETS_ODD = ((0, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0))
+
+
+def neighbor_offsets(q):
+    """列 q 的 6 个邻居偏移（保证寻路和 Hex_Editor 画出的地图一致）。"""
+    return _OFFSETS_ODD if (int(q) % 2) else _OFFSETS_EVEN
+
+
+def neighbors_of(centers, cell):
+    """地图上真实存在的邻居格。"""
+    q, r = int(cell[0]), int(cell[1])
+    for dq, dr in neighbor_offsets(q):
+        other = (q + dq, r + dr)
+        if other in centers:
+            yield other
+
+
+def unit_cell(unit):
+    """单位所在格：(列, 行)；取不到返回 None。"""
+    q, r = unit.get('q'), unit.get('r')
+    if q is None or r is None:
+        return parse_cell_key(unit.get('cell'))
+    try:
+        return (int(q), int(r))
+    except (TypeError, ValueError):
+        return None
+
+
+def unit_move_allowance(unit):
+    """一支单位每回合的移动力：优先单位自己的 move，其次单位类型数据，最后兜底。"""
+    for source in (unit.get('move'), unit_stats(unit.get('type')).get('move')):
+        try:
+            value = int(source)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return DEFAULT_MOVE_POINTS
+
+
+def effective_move_left(unit):
+    """本回合还剩多少移动力（没记过就按满移动力算）。"""
+    value = unit.get('move_left')
+    if value is None:
+        return unit_move_allowance(unit)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return unit_move_allowance(unit)
+
+
+def ensure_unit_moves(units):
+    """给还没有 move_left 字段的单位补上满移动力（不动已经消耗过的记录）。"""
+    for unit in units:
+        if unit.get('move_left') is None:
+            unit['move_left'] = unit_move_allowance(unit)
+
+
+def reset_unit_moves(units, faction):
+    """进入某一方的回合：把该方所有单位的移动力补满。"""
+    name = faction_key(faction)
+    for unit in units:
+        if faction_key(unit.get('faction')) == name:
+            unit['move_left'] = unit_move_allowance(unit)
+
+
+def cell_move_cost(view, cell):
+    """进入某格的消耗：场景里单独标过就用它，否则按地形表。"""
+    q, r = int(cell[0]), int(cell[1])
+    cost = view.terrain_costs.get((q, r))
+    if cost is not None:
+        return max(1, int(cost))
+    return max(1, terrain_cost(view.terrain_cells.get((q, r), '空地')))
+
+
+def edge_move_cost(view, cell_a, cell_b):
+    """跨过两格之间那条边的额外消耗（没有格边地形就是 0）。"""
+    key = frozenset(((int(cell_a[0]), int(cell_a[1])),
+                     (int(cell_b[0]), int(cell_b[1]))))
+    cost = view.edge_costs.get(key)
+    if cost is not None:
+        return max(0, int(cost))
+    name = view.edge_between.get(key)
+    return max(0, edge_cost(name)) if name else 0
+
+
+def step_move_cost(view, cell_a, cell_b):
+    """从 A 走到相邻格 B 的消耗 = B 的地形消耗 + 跨过那条边的消耗。"""
+    return cell_move_cost(view, cell_b) + edge_move_cost(view, cell_a, cell_b)
+
+
+def occupied_by_others(view, unit):
+    """走不过去的格子：有别的阵营单位驻扎的格（自己人可以叠加，不算阻挡）。"""
+    mine = faction_key(unit.get('faction'))
+    return {cell for cell, records in view.stacks.items()
+            if any(faction_key(other.get('faction')) != mine for other in records)}
+
+
+def reachable_cells(view, unit, budget=None):
+    """单位在剩余移动力内能走到的格子：{(列,行): 最省累计消耗}。
+
+    用 Dijkstra 求最省消耗，地形贵的地方会绕开；进入一格的消耗算的是目标格地形
+    加跨边消耗。有别的阵营单位的格子不能进；自己人的格子可以路过，但不当落脚点
+    （点那种格子是选中单位，不是移动）。
+    """
+    start = unit_cell(unit)
+    if start is None or start not in view.centers:
+        return {}
+    if budget is None:
+        budget = effective_move_left(unit)
+    if budget <= 0:
+        return {}
+
+    blocked = occupied_by_others(view, unit)
+    dist = {start: 0}
+    heap = [(0, start)]
+    while heap:
+        cost, cell = heapq.heappop(heap)
+        if cost > dist.get(cell, float('inf')):
+            continue
+        for other in neighbors_of(view.centers, cell):
+            if other in blocked:
+                continue
+            new_cost = cost + step_move_cost(view, cell, other)
+            if new_cost > budget:
+                continue
+            if new_cost < dist.get(other, float('inf')):
+                dist[other] = new_cost
+                heapq.heappush(heap, (new_cost, other))
+
+    dist.pop(start, None)
+    for cell in list(dist):
+        if cell in view.stacks:
+            dist.pop(cell)
+    return dist
+
+
+def unit_can_move(unit, faction):
+    """这支单位现在能不能动：必须是当前行动方，且本回合还有移动力。"""
+    current = faction_key(faction)
+    return (bool(current)
+            and faction_key(unit.get('faction')) == current
+            and effective_move_left(unit) > 0)
+
+
+def apply_unit_move(view, unit, cell, cost):
+    """把单位搬到目标格：更新坐标 / 格号 / 中心像素，并扣掉移动力。返回剩余移动力。"""
+    q, r = int(cell[0]), int(cell[1])
+    unit['q'] = q
+    unit['r'] = r
+    unit['cell'] = '%d,%d' % (q, r)
+    cols = int(view.map_info.get('cols') or 0)
+    if cols > 0:
+        unit['cell_id'] = r * cols + q + 1        # 和 Hex_Editor 的编号规则一致
+    center = view.centers.get((q, r))
+    if center is not None:
+        unit['center_px'] = [float(center[0]), float(center[1])]
+    left = max(0, effective_move_left(unit) - max(0, int(cost)))
+    unit['move_left'] = left
+    return left
+
+
 def faction_color(faction):
     """阵营 → RGB：名字里带颜色字就按字面取色，否则按名字稳定散列。"""
     text = str(faction or '')
@@ -593,7 +772,8 @@ def edge_segment(key, centers, cell):
             (mid[0] + tangent[0] * half, mid[1] + tangent[1] * half))
 
 
-def unit_details(unit, cell, terrain_name, stack_size, index, stats=None):
+def unit_details(unit, cell, terrain_name, stack_size, index, stats=None,
+                 active_faction=None):
     """左侧栏里显示的单位详情：本身属性 + 上级编制 + units.data 里的作战数据。"""
     path = unit.get('path') or []
     step = unit.get('step')
@@ -621,6 +801,18 @@ def unit_details(unit, cell, terrain_name, stack_size, index, stats=None):
         lines.extend(['', '本格共 %d 个单位，当前第 %d 个（点地图上的军标可切换）'
                       % (stack_size, index + 1)])
 
+    lines.extend(['', '── 本回合移动 ──',
+                  '移动力：剩余 %d / %d' % (effective_move_left(unit),
+                                            unit_move_allowance(unit))])
+    if not active_faction:
+        lines.append('没有回合信息，不能移动')
+    elif faction_key(unit.get('faction')) != faction_key(active_faction):
+        lines.append('现在轮到 %s：这支部队要等自己回合才能动' % active_faction)
+    elif effective_move_left(unit) <= 0:
+        lines.append('本回合移动力已用完，点“下一回合”后恢复')
+    else:
+        lines.append('点地图上高亮的格子把它走过去')
+
     lines.extend(['', '── 单位数据（units.data）──'])
     if stats:
         values = [('%s %s' % (label, stats.get(field, '—'))) for field, label in STAT_FIELDS]
@@ -637,10 +829,11 @@ def unit_details(unit, cell, terrain_name, stack_size, index, stats=None):
 class GameView:
     """地图视图：渲染成 Bitmap 交给 PictureBox，并处理缩放 / 平移 / 选中单位。"""
 
-    def __init__(self, picture, on_select=None, on_zoom=None):
+    def __init__(self, picture, on_select=None, on_zoom=None, on_move=None):
         self.picture = picture
         self.on_select = on_select                # 回调(选中格, 该格单位, 选中序号)
         self.on_zoom = on_zoom                    # 回调(缩放比例)
+        self.on_move = on_move                    # 回调(单位, 目标格, 消耗) → 是否移动成功
         self.data = None
         self.path = None
         self.name = ''
@@ -651,7 +844,11 @@ class GameView:
         self.cell = 0.0
         self.centers = {}
         self.terrain_cells = {}
+        self.terrain_costs = {}                   # 场景里单独标过的格子消耗
         self.edge_items = []
+        self.edge_costs = {}                      # 格边 -> 单独标过的跨边消耗
+        self.edge_between = {}                    # 相邻两格 -> 格边地形名
+        self.reachable = {}                       # 选中单位能走到的格子
         self.stacks = {}
         self.units = []
         self.zoom = 1.0
@@ -698,21 +895,44 @@ class GameView:
         self.centers = {(q, r): (x, y) for q, r, x, y in layout['centers']}
 
         self.terrain_cells = {}
+        self.terrain_costs = {}
         for key, value in (data.get('cells') or {}).items():
             cell = parse_cell_key(key)
             name = value[0] if isinstance(value, (list, tuple)) and value else value
-            if cell is not None and name:
-                self.terrain_cells[cell] = str(name)
+            if cell is None or not name:
+                continue
+            self.terrain_cells[cell] = str(name)
+            # 值写成 [地形名, 消耗, 修正] 时，消耗以场景为准
+            if isinstance(value, (list, tuple)) and len(value) > 1:
+                try:
+                    self.terrain_costs[cell] = int(value[1])
+                except (TypeError, ValueError):
+                    pass
 
         self.edge_items = []
+        self.edge_costs = {}
+        self.edge_between = {}
         for key, value in (data.get('edges') or {}).items():
             name = value[0] if isinstance(value, (list, tuple)) and value else value
-            if name:
-                self.edge_items.append((str(name), key))
+            if not name:
+                continue
+            name = str(name)
+            self.edge_items.append((name, key))
+            ends = [parse_cell_key(part) for part in str(key).split('|')]
+            if len(ends) != 2 or ends[0] is None or ends[1] is None:
+                continue                          # 地图边界上的格边：不参与两格之间的移动
+            pair = frozenset((ends[0], ends[1]))
+            self.edge_between[pair] = name
+            if isinstance(value, (list, tuple)) and len(value) > 1:
+                try:
+                    self.edge_costs[pair] = int(value[1])
+                except (TypeError, ValueError):
+                    pass
 
         self.units = list(data.get('units') or [])
         self.stacks = group_units(self.units)
         self.active_faction = None
+        self.reachable = {}
         self.clear_selection()
         self._tile = None
         self._tile_key = None
@@ -722,6 +942,7 @@ class GameView:
         self.selected_cell = None
         self.selected_units = []
         self.selected_index = 0
+        self.reachable = {}
 
     # ---------- 坐标换算 ----------
     def to_screen(self, x, y):
@@ -858,12 +1079,17 @@ class GameView:
         return best
 
     def select_at(self, sx, sy):
-        """点击：选中格子；如果点到某个军标，就选中那个单位。"""
+        """点击：先看是不是“把选中的单位走到这一格”，否则选中格子 / 单位。"""
         cell = self.cell_at(sx, sy)
         if cell is None:
             self.select_cell(None)
             return
+        # 已经选中一支能动的单位：点高亮的空格 = 走过去（点有单位的格子还是选中）
         units = self.stacks.get(cell, [])
+        if not units and cell in self.reachable and self.on_move is not None:
+            unit = self.selected_unit()
+            if unit is not None and self.on_move(unit, cell, self.reachable[cell]):
+                return
         index = 0
         if len(units) > 1:
             center = self.centers.get(cell)
@@ -877,6 +1103,14 @@ class GameView:
                         break
         self.select_cell(cell, index)
 
+    def refresh_reachable(self):
+        """选中变化后重算可达格：只有当前行动方、还有移动力的单位才高亮。"""
+        unit = self.selected_unit()
+        if unit is None or not unit_can_move(unit, self.active_faction):
+            self.reachable = {}
+            return
+        self.reachable = reachable_cells(self, unit)
+
     def select_cell(self, cell, index=0):
         if cell is None:
             self.clear_selection()
@@ -884,6 +1118,7 @@ class GameView:
             self.selected_cell = (int(cell[0]), int(cell[1]))
             self.selected_units = self.stacks.get(self.selected_cell, [])
             self.selected_index = index if 0 <= index < len(self.selected_units) else 0
+        self.refresh_reachable()
         self.render()
         if self.on_select is not None:
             self.on_select(self.selected_cell, self.selected_units, self.selected_index)
@@ -956,9 +1191,31 @@ class GameView:
                 self.view_x + width / zoom, self.view_y + height / zoom)
         self.draw_terrain(graphics, view)
         self.draw_edges(graphics, view)
+        if self.reachable:
+            self.draw_reachable(graphics, cell_px)
         if cell_px >= 9.0:
             self.draw_units(graphics, cell_px)
         self.draw_selection(graphics)
+
+    def draw_reachable(self, graphics, cell_px):
+        """可达格高亮：阵营色半透明填充 + 描边，格子够大时写下走到这里要几点移动力。"""
+        rgb = faction_color(self.active_faction)
+        fill = SolidBrush(Color.FromArgb(MOVE_OVERLAY_ALPHA, rgb[0], rgb[1], rgb[2]))
+        pen = Pen(Color.FromArgb(MOVE_OVERLAY_EDGE_ALPHA, rgb[0], rgb[1], rgb[2]), 1.5)
+        show_cost = cell_px >= MOVE_COST_MIN_PIXELS
+        for cell, cost in self.reachable.items():
+            center = self.centers.get(cell)
+            if center is None:
+                continue
+            points = self.hex_points(center[0], center[1])
+            graphics.FillPolygon(fill, points)
+            graphics.DrawPolygon(pen, points)
+            if show_cost:
+                cx, cy = self.to_screen(center[0], center[1])
+                self.draw_centered_text(graphics, str(cost), cx, cy - 7.0,
+                                        self.name_font, TEXT_COLOR)
+        pen.Dispose()
+        fill.Dispose()
 
     def in_view(self, x, y, view, pad):
         return (view[0] - pad) <= x <= (view[2] + pad) and (view[1] - pad) <= y <= (view[3] + pad)
@@ -994,7 +1251,6 @@ class GameView:
             pen.Dispose()
 
     def draw_units(self, graphics, cell_px):
-        active = faction_key(self.active_faction) if self.dim_inactive else ''
         for (q, r), records in self.stacks.items():
             center = self.centers.get((q, r))
             if center is None:
@@ -1007,7 +1263,16 @@ class GameView:
                 self.draw_unit_symbol(graphics, bx, by, bw, bh, unit,
                                       number=(index + 1) if len(records) > 1 else 0,
                                       selected=selected_stack and index == self.selected_index,
-                                      dim=bool(active) and faction_key(unit.get('faction')) != active)
+                                      dim=self.unit_is_dim(unit))
+
+    def unit_is_dim(self, unit):
+        """画成半透明的两种情况：不是当前行动方的部队；本方但本回合移动力已用完。"""
+        active = faction_key(self.active_faction)
+        if not active:
+            return False
+        if faction_key(unit.get('faction')) != active:
+            return self.dim_inactive
+        return effective_move_left(unit) <= 0
 
     def stack_slots(self, cx, cy, cell_px, count):
         """一格内多个军标的排布（列数取 sqrt(n) 向上取整），返回 [(中心x, 中心y, 宽, 高)]。"""
@@ -1219,7 +1484,8 @@ def build_game_window(owner=None, scenario_path=None, mode=None):
 
     view = GameView(picture,
                     on_select=lambda cell, units, index: refresh_selection(cell, units, index),
-                    on_zoom=lambda zoom: update_zoom(zoom))
+                    on_zoom=lambda zoom: update_zoom(zoom),
+                    on_move=lambda unit, cell, cost: move_selected(unit, cell, cost))
 
     # 游戏状态：回合状态与当前存档路径（载入后才有值）
     state = {'game': None, 'save_path': None}
@@ -1286,11 +1552,14 @@ def build_game_window(owner=None, scenario_path=None, mode=None):
                         '点“下一回合”换对方行动；对方单位在地图上显示为半透明。\n\n'
                         % (game.number, game.current, game.unit_count()))
             details.Text = (head +
-                            '点击地图上的单位来选中它。\n\n'
+                            '点自己方的单位选中它 → 地图上高亮的格子就是它这回合\n'
+                            '能走到的地方（数字是消耗的移动力），点一下就走过去。\n'
+                            '移动力用完的单位会变淡，点“下一回合”后恢复。\n\n'
                             '滚轮缩放（以光标为中心）\n'
                             'WASD / 方向键平移\n'
                             'Shift+滚轮左右平移\n'
                             '按住左键拖动平移\n'
+                            'Esc 取消选中\n'
                             'Ctrl+S 保存存档　Ctrl+Shift+S 另存为')
             status.Text = scenario_line() + '　|　点击地图上的单位'
             return
@@ -1304,8 +1573,10 @@ def build_game_window(owner=None, scenario_path=None, mode=None):
             return
 
         unit = units[index] if 0 <= index < len(units) else units[0]
+        game = state['game']
         details.Text = unit_details(unit, cell, terrain, len(units), index,
-                                    unit_stats(unit.get('type')))
+                                    unit_stats(unit.get('type')),
+                                    game.current if game is not None else None)
         status.Text = ('%s　|　选中 %s (%d,%d)%s'
                        % (scenario_line(), unit.get('name') or unit.get('type') or '?',
                           cell[0], cell[1],
@@ -1325,6 +1596,10 @@ def build_game_window(owner=None, scenario_path=None, mode=None):
         modifiers = Control.ModifierKeys
         if (modifiers & Keys.Control) == Keys.Control and key == Keys.S:
             save_game(as_new=(modifiers & Keys.Shift) == Keys.Shift)
+            event.Handled = True
+            return
+        if key == Keys.Escape:
+            view.select_cell(None)               # 取消选中 / 结束这次的移动
             event.Handled = True
             return
         if key in (Keys.W, Keys.Up):
@@ -1386,14 +1661,32 @@ def build_game_window(owner=None, scenario_path=None, mode=None):
         refresh_selection(None, [], 0)
         view.render()
 
+    def move_selected(unit, cell, cost):
+        """把选中的单位走到目标格；只有当前行动方的单位能移动。"""
+        game = state['game']
+        if game is None or not unit_can_move(unit, game.current):
+            status.Text = '现在不是这支部队的回合，不能移动它。'
+            return False
+        left = apply_unit_move(view, unit, cell, cost)
+        view.stacks = group_units(view.units)          # 单位换了格子，重新分组
+        group = view.stacks.get(cell) or []
+        if unit in group:
+            unit['stack'] = group.index(unit)          # 同一格里的序号也跟着更新
+        view.select_cell(cell, group.index(unit) if unit in group else 0)
+        status.Text = '%s　|　%s 走到 (%d,%d)，消耗 %d，剩余移动力 %d' % (
+            scenario_line(), unit.get('name') or unit.get('type') or '单位',
+            int(cell[0]), int(cell[1]), int(cost), left)
+        return True
+
     def advance_turn():
         """结束当前方的回合，换对方行动；两方都走完就进入下一回合。"""
         game = state['game']
         if game is None:
             return
         game.advance()
+        reset_unit_moves(view.units, game.current)     # 换手后新行动方的移动力补满
         update_game_state()
-        status.Text = '%s　|　轮到 %s 行动（该方单位 %d 个）' % (
+        status.Text = '%s　|　轮到 %s 行动（该方单位 %d 个，移动力已恢复）' % (
             scenario_line(), game.current, game.unit_count())
 
     def save_game(as_new=False):
@@ -1441,6 +1734,7 @@ def build_game_window(owner=None, scenario_path=None, mode=None):
     if data is not None:
         try:
             view.load(data, scenario_path)
+            ensure_unit_moves(view.units)          # 老存档没有 move_left 的补满
             turn_block = data.get('turn') if isinstance(data.get('turn'), dict) else {}
             game = HotseatGame(view.units, turn_block, mode or turn_block.get('mode'))
             if scenario_path:
