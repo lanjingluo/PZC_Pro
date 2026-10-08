@@ -89,8 +89,10 @@ BACKGROUND_MODULE = 'ui_background'
 BACKGROUND_RELATIVE_PATH = os.path.join('basic_picture_resources', 'background.png')
 FALLBACK_BACK_COLOR = Color.FromArgb(32, 34, 38)
 
-# 打包成 exe 后 sys.executable 是 exe 自己，不能再拿来跑 .py，所以留一个自带运行时的路径
-# （和 run_launcher.bat / Hex_Editor/run.bat / setup/run_setup.bat 里写的一致）
+# 打包成 exe 后 sys.executable 是 exe 自己，不能再拿来跑 .py，所以要另找解释器：
+# 先用项目自己的虚拟环境（setup_env.bat 建的 .venv，和各个 run_*.bat 一致），
+# 找不到再退回 Codex 自带运行时——那个目录会随运行时升级被换掉，不能只认它。
+VENV_PYTHONW = os.path.join('.venv', 'Scripts', 'pythonw.exe')
 BUNDLED_PYTHONW = os.path.join(
     r'C:\Users\36349\.cache\codex-runtimes\codex-primary-runtime\dependencies\python',
     'pythonw.exe',
@@ -165,8 +167,9 @@ def pythonw_path():
                 return sibling
         return exe
 
-    if os.path.isfile(BUNDLED_PYTHONW):
-        return BUNDLED_PYTHONW
+    for path in (os.path.join(project_dir(), VENV_PYTHONW), BUNDLED_PYTHONW):
+        if os.path.isfile(path):
+            return path
     for name in ('pythonw.exe', 'pythonw', 'python.exe', 'python'):
         found = shutil.which(name)
         if found:
@@ -186,7 +189,9 @@ def launch_tool(text, folder, script):
     if not exe:
         show_error(
             '找不到可用的 Python 解释器，无法打开 %s。\n\n'
-            '请确认已安装 Python（或 %s 存在）。' % (text, BUNDLED_PYTHONW)
+            '请先在项目根目录运行 setup_env.bat 建好 .venv，\n'
+            '或确认系统 PATH 上有 python。\n\n（要找的是 %s）'
+            % (text, os.path.join(project_dir(), VENV_PYTHONW))
         )
         return
 
